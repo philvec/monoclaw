@@ -218,7 +218,10 @@ class AgentLoop:
             return
         async with self._session.lock:
             self._archive_checkpoint(self._session.history)
-            self._session.history = await self._ctx.compact(self._session.history, self._llm)
+            self._session.history = await self._ctx.compact(
+                self._session.history, self._llm,
+                memory_flush_fn=self._memory.flush_memories,
+            )
             self._save_checkpoint()
 
     def _archive_checkpoint(self, history: list[ChatCompletionMessageParam]) -> None:
@@ -233,12 +236,14 @@ class AgentLoop:
 
     async def _run_extract_memories(self, history: list[ChatCompletionMessageParam]) -> None:
         try:
-            entries = await self._memory.extract_memories(history)
-            if entries:
+            ops = await self._memory.extract_memories(history)
+            if ops:
                 self._append_to_checkpoint(
                     ChatCompletionUserMessageParam(
                         role="user",
-                        content="[MEMORY SAVED]\n" + "\n".join(f"- {e}" for e in entries),
+                        content="[MEMORY SAVED]\n" + "\n".join(
+                            f"- {op.slug} ({op.type})" for op in ops
+                        ),
                     ),
                 )
         except Exception as exc:

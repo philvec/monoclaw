@@ -4,12 +4,12 @@
 
 Personal AI assistant with one continuous session, WebSocket-native multi-channel interaction, minimal codebase for clarity and security.
 
-**codebase:** `1398 lines across 10 files`
+**codebase:** `2100 lines across 10 files`
 
 ---
 
 - agent turn loop, tool base class + registry, file/shell/web tools, `CronService` — rewritten in Python based on [NanoClaw](https://github.com/qwibitai/nanoclaw)
-- post-turn memory extraction, context window tracking and compaction — inspired by [free-code](https://github.com/paoloanzn/free-code)
+- structured memory with hybrid search, tiered compaction — inspired by [free-code](https://github.com/paoloanzn/free-code) and [OpenClaw](https://github.com/openclaw/openclaw)
 - massive open-source codebase, unreviewed community contributions, security vulnerabilities nobody can trace — graciously avoided thanks to [OpenClaw](https://github.com/openclaw/openclaw)
 
 
@@ -18,7 +18,9 @@ Personal AI assistant with one continuous session, WebSocket-native multi-channe
 - **Single continuous session** — one history shared across all channels and time. The agent is coherent and persistent like a human, not stateless.
 - **WebSocket-only protocol** — monoclaw speaks one protocol. Bridges (Signal, Telegram, web UI, etc.) are separate applications that connect over WebSocket and declare their name on handshake.
 - **Agent-selectable output channel** — the agent can inspect active channels and redirect its reply mid-turn using tools. Default: reply to the inbound channel.
-- **Automatic fire-and-forget compaction** — context is compacted automatically after the response is delivered, not before. The user never waits. History is archived before each compaction.
+- **Structured long-term memory** — typed memories (user/project/reference/feedback) stored as individual Markdown files with SQLite FTS5 index. Hybrid keyword + vector search with temporal decay and MMR diversity re-ranking. Agent searches its own memory via tools.
+- **Automatic post-turn extraction** — after each response, the LLM extracts memorable facts and saves them with embeddings. Existing memories are updated, not duplicated.
+- **Tiered compaction** — microcompact (archive and truncate old tool results) → pre-compaction memory flush → full LLM summary. Fire-and-forget after response delivery.
 - **Container-as-deployment isolation** — security comes from container isolation, not application-level sandboxing. The agent process itself runs in Docker; tools operate under `data/workspace/` directly. Single WebSocket entrypoint — extension and security is shifted to proxies managed aside.
 
 ---
@@ -63,7 +65,14 @@ monoclaw runs as a single Docker container. Bridges run separately and connect t
 ```yaml
 llm:
   base_url: http://your-llama-cpp-host:8080/v1
+  embeddings_url: http://your-embedding-server:8090/v1  # optional, falls back to base_url
   max_tokens: 4096
+
+tools:
+  memory_decay_halflife_days: 30     # older memories rank lower in search
+  memory_embedding_weight: 0.6      # vector vs keyword balance (0 = FTS only, 1 = vector only)
+  memory_mmr_lambda: 0.7            # relevance vs diversity in results
+  memory_consolidation_cron: ""     # e.g. "0 3 * * *" for daily consolidation
 ```
 
 **2. Build and run**
@@ -77,7 +86,7 @@ docker run -d \
   monoclaw
 ```
 
-`data/` is the persistent volume — it holds conversation history, memory, cron jobs, archives, and the agent workspace.
+`data/` is the persistent volume — it holds conversation history, memory (Markdown files + SQLite index), cron jobs, archives (compacted history + tool results), and the agent workspace.
 
 ---
 
@@ -100,3 +109,7 @@ Register it in `ToolRegistry.from_config`. The schema is generated automatically
 ## Swapping the LLM
 
 `LLMClient` wraps any OpenAI-compatible API. Point `llm.base_url` at any server (Ollama, vLLM, OpenAI, etc.).
+
+For embeddings, set `llm.embeddings_url` to a dedicated embedding server (recommended) or leave empty to use the main LLM endpoint. A dedicated model like Qwen3-Embedding-8B produces better vectors than pooling from a generative model.
+
+See [docs.md](docs.md) for details on the memory system architecture.

@@ -2,7 +2,9 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import httpx
 import json_repair
+import numpy as np
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
@@ -54,6 +56,25 @@ class LLMClient:
                 logger.info(f"waiting for LLM to be ready: {exc}")
                 await asyncio.sleep(5)
 
+    async def embed(self, text: str) -> np.ndarray | None:
+        """Generate embedding via /v1/embeddings. Uses embeddings_url if set, else base_url."""
+        url = (self._cfg.embeddings_url or self._cfg.base_url).rstrip("/")
+        try:
+            async with httpx.AsyncClient() as http:
+                resp = await http.post(
+                    f"{url}/embeddings",
+                    json={"input": text, "model": "local"},
+                    timeout=10.0,
+                )
+                if resp.status_code != 200:
+                    logger.debug(f"embedding endpoint returned {resp.status_code}")
+                    return None
+                data = resp.json()
+                return np.array(data["data"][0]["embedding"], dtype=np.float32)
+        except Exception as exc:
+            logger.debug(f"embedding generation failed: {exc}")
+            return None
+
     async def chat(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -72,7 +93,11 @@ class LLMClient:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
         if response_model is not None:
-            kwargs["response_format"] = response_model
+            schema = response_model.model_json_schema()
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": response_model.__name__, "schema": schema},
+            }
 
         chunks: list[Any] = []
         try:
@@ -87,7 +112,17 @@ class LLMClient:
 
         result = self._parse_chunks(chunks)
         if response_model is not None and result.content:
-            result = result.model_copy(update={"parsed": response_model.model_validate_json(result.content)})
+            parsed: BaseModel | None = None
+            try:
+                parsed = response_model.model_validate_json(result.content)
+            except Exception:
+                try:
+                    repaired = json_repair.loads(result.content)
+                    if isinstance(repaired, dict):
+                        parsed = response_model.model_validate(repaired)
+                except Exception as exc:
+                    logger.warning(f"structured output parse failed: {exc}")
+            result = result.model_copy(update={"parsed": parsed})
         return result
 
     def _parse_chunks(self, chunks: list[Any]) -> LLMResponse:

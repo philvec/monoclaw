@@ -22,6 +22,7 @@ WS_PORT = 8765
 
 class LLMConfig(BaseModel):
     base_url: str = "http://localhost:8080/v1"
+    embeddings_url: str = ""  # separate embedding server; falls back to base_url if empty
     max_tokens: int = 4096
     compaction_threshold: float = 0.85
     enable_thinking: bool = True
@@ -32,6 +33,11 @@ class ToolsConfig(BaseModel):
     exec_timeout_max_s: int = 600
     memory_ctx_trunc_n: int = 20
     memory_msg_max_len: int = 500
+    memory_keep_recent: int = 10
+    memory_decay_halflife_days: int = 30
+    memory_embedding_weight: float = 0.6
+    memory_mmr_lambda: float = 0.7
+    memory_consolidation_cron: str = ""
 
 
 class Config(BaseSettings):
