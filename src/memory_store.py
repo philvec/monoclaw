@@ -116,6 +116,7 @@ END;
 """
 
 _MEMORY_MD_HEADER = "# monoclaw memory\n\n"
+_MASTER_MEMORY_FILE = "MASTER.md"
 
 
 class MemoryStore:
@@ -197,6 +198,18 @@ class MemoryStore:
         return [MemoryEntry(slug=r[0], type=r[1], content=r[2],
                             created=datetime.fromisoformat(r[3]), updated=datetime.fromisoformat(r[4]))
                 for r in rows]
+
+    # ── master memory ──
+
+    def read_master_memory(self) -> str:
+        path = self._base / _MASTER_MEMORY_FILE
+        if not path.exists():
+            return ""
+        return path.read_text().strip()
+
+    def write_master_memory(self, content: str) -> None:
+        path = self._base / _MASTER_MEMORY_FILE
+        path.write_text(content.strip() + "\n")
 
     # ── search ──
 

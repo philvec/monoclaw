@@ -92,6 +92,7 @@ class ToolRegistry:
                 ListOutputChannelsTool(cfg, channel_manager),
                 MemorySearchTool(cfg, memory_store, llm),
                 MemoryReadTool(cfg, memory_store),
+                MasterMemoryTool(cfg, memory_store),
             ],
         ):
             registry.register(tool)
@@ -506,3 +507,24 @@ class MemoryReadTool(Tool["MemoryReadTool.Params"]):
             f"Created: {entry.created.isoformat()} | Updated: {entry.updated.isoformat()}\n\n"
             f"{entry.content}"
         )
+
+
+class MasterMemoryTool(Tool["MasterMemoryTool.Params"]):
+    """Read or update master memory — core identity and instructions always in the system prompt. \
+Use for: user name, language, timezone, key behavioral rules, critical context. \
+Only update when the user explicitly asks. Changes affect every future turn."""
+
+    def __init__(self, cfg: Config, store: MemoryStore) -> None:
+        super().__init__(cfg)
+        self._store = store
+
+    class Params(BaseModel):
+        action: Literal["read", "write"] = Field(description="'read' to view, 'write' to replace")
+        content: str = Field(default="", description="New content (only for write)")
+
+    async def execute(self, params: Params) -> str:  # type: ignore[override]
+        if params.action == "read":
+            text = self._store.read_master_memory()
+            return text if text else "(master memory is empty)"
+        self._store.write_master_memory(params.content)
+        return f"master memory updated ({len(params.content)} chars)"

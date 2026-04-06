@@ -96,7 +96,10 @@ class MemoryManager:
         self._store = store
 
     def build_system_prompt(self) -> str:
-        """Return static system prompt. Memory is accessed via tools, not injected."""
+        """Return system prompt with master memory (changes rarely)."""
+        master = self._store.read_master_memory()
+        if master:
+            return _BASE_SYSTEM_PROMPT + "\n\n---\n\n" + master
         return _BASE_SYSTEM_PROMPT
 
     async def extract_memories(

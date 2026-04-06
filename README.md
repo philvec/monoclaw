@@ -4,7 +4,7 @@
 
 Personal AI assistant with one continuous session, WebSocket-native multi-channel interaction, minimal codebase for clarity and security.
 
-**codebase:** `2146 lines across 10 files`
+**codebase:** `2175 lines across 10 files`
 
 ---
 

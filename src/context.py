@@ -77,15 +77,7 @@ class ContextManager:
             for entry in entries:
                 f.write(json.dumps(entry) + "\n")
 
-    def _estimate_tokens(self, history: list[ChatCompletionMessageParam]) -> int:
-        """Rough token estimate: total chars / 4."""
-        total = 0
-        for msg in history:
-            content = msg.get("content", "")
-            total += len(str(content))
-        return total // 4
-
-    # ── tiered compaction ──
+    # ── compaction ──
 
     async def compact(
         self,
