@@ -470,10 +470,13 @@ class MemorySearchTool(Tool["MemorySearchTool.Params"]):
     class Params(BaseModel):
         query: str = Field(description="Search keywords or phrase")
         limit: int = Field(default=10, description="Max results to return")
+        type: str = Field(default="", description="Filter by type: user/project/reference/feedback/skill (empty = all)")
 
     async def execute(self, params: Params) -> str:  # type: ignore[override]
         query_embedding = await self._llm.embed(params.query)
-        results = self._store.search(params.query, query_embedding=query_embedding, limit=params.limit)
+        mem_type = params.type if params.type else None
+        results = self._store.search(params.query, query_embedding=query_embedding,
+                                     limit=params.limit, mem_type=mem_type)
         if not results:
             return "no matching memories"
         lines = []

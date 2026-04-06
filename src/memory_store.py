@@ -14,7 +14,16 @@ from config import logger
 
 # ── models ──
 
-_MEMORY_TYPES = ("user", "feedback", "project", "reference")
+_MEMORY_TYPES = ("user", "feedback", "project", "reference", "skill")
+
+# per-type temporal decay half-life in days (0 = no decay)
+_TYPE_HALFLIFE: dict[str, int] = {
+    "user": 365,       # preferences change slowly
+    "feedback": 180,   # behavior corrections fade slowly
+    "project": 14,     # ongoing work goes stale fast
+    "reference": 0,    # facts don't age
+    "skill": 0,        # procedures stay valid until updated
+}
 
 
 class MemoryEntry(BaseModel):
@@ -59,11 +68,14 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return dot / (na * nb) if na > 0 and nb > 0 else 0.0
 
 
-def _temporal_decay(updated_iso: str, halflife_days: int) -> float:
+def _temporal_decay(updated_iso: str, halflife_days: int, mem_type: str = "") -> float:
+    hl = _TYPE_HALFLIFE.get(mem_type, halflife_days)
+    if hl == 0:
+        return 1.0  # no decay
     try:
         updated = datetime.fromisoformat(updated_iso.replace("Z", "+00:00"))
         days = (datetime.now(timezone.utc) - updated).total_seconds() / 86400
-        return 0.3 + 0.7 * math.exp(-0.693 * days / max(halflife_days, 1))
+        return 0.3 + 0.7 * math.exp(-0.693 * days / hl)
     except Exception:
         return 1.0
 
@@ -189,14 +201,14 @@ class MemoryStore:
     # ── search ──
 
     def search(self, query: str, query_embedding: np.ndarray | None = None,
-               limit: int = 10) -> list[SearchResult]:
+               limit: int = 10, mem_type: str | None = None) -> list[SearchResult]:
         # Step 1: FTS5 keyword candidates
-        fts_results = self._fts_search(query, limit=limit * 3)
+        fts_results = self._fts_search(query, limit=limit * 3, mem_type=mem_type)
 
         # Step 2: vector similarity (if embeddings available)
         vector_scores: dict[str, float] = {}
         if query_embedding is not None:
-            vector_scores = self._vector_scores(query_embedding)
+            vector_scores = self._vector_scores(query_embedding, mem_type=mem_type)
 
         # Step 3: hybrid merge
         candidates = self._hybrid_merge(fts_results, vector_scores)
@@ -209,30 +221,34 @@ class MemoryStore:
 
         return candidates
 
-    def _fts_search(self, query: str, limit: int) -> list[dict]:
+    def _fts_search(self, query: str, limit: int, mem_type: str | None = None) -> list[dict]:
         # tokenize into individual terms joined by OR for broad matching
         terms = [t.strip() for t in re.split(r'\s+', query.strip()) if t.strip()]
         if not terms:
             return []
         fts_query = " OR ".join(f'"{t.replace(chr(34), "")}"' for t in terms)
+        sql = (
+            "SELECT m.slug, m.type, m.updated, "
+            "  snippet(memories_fts, 1, '>>>', '<<<', '...', 40) as snippet, "
+            "  bm25(memories_fts, 1.0, 3.0, 1.0) as rank "
+            "FROM memories_fts "
+            "JOIN memories m ON memories_fts.slug = m.slug "
+            "WHERE memories_fts MATCH ? "
+        )
+        params: list[str | int] = [fts_query]
+        if mem_type:
+            sql += "AND m.type = ? "
+            params.append(mem_type)
+        sql += "ORDER BY rank LIMIT ?"
+        params.append(limit)
         try:
-            rows = self._db.execute(
-                "SELECT m.slug, m.type, m.updated, "
-                "  snippet(memories_fts, 1, '>>>', '<<<', '...', 40) as snippet, "
-                "  bm25(memories_fts, 1.0, 3.0, 1.0) as rank "
-                "FROM memories_fts "
-                "JOIN memories m ON memories_fts.slug = m.slug "
-                "WHERE memories_fts MATCH ? "
-                "ORDER BY rank "
-                "LIMIT ?",
-                (fts_query, limit),
-            ).fetchall()
+            rows = self._db.execute(sql, params).fetchall()
         except sqlite3.OperationalError:
             return []
 
         results = []
         for r in rows:
-            decay = _temporal_decay(r[2], self._halflife)
+            decay = _temporal_decay(r[2], self._halflife, mem_type=r[1])
             bm25_raw = abs(r[4])  # bm25 returns negative values (lower = better)
             results.append({
                 "slug": r[0], "type": r[1],
@@ -245,15 +261,19 @@ class MemoryStore:
                 r["bm25_norm"] = r["bm25"] / max_bm25
         return results
 
-    def _vector_scores(self, query_embedding: np.ndarray) -> dict[str, float]:
-        rows = self._db.execute(
-            "SELECT slug, embedding, updated FROM memories WHERE embedding IS NOT NULL"
-        ).fetchall()
+    def _vector_scores(self, query_embedding: np.ndarray,
+                       mem_type: str | None = None) -> dict[str, float]:
+        sql = "SELECT slug, type, embedding, updated FROM memories WHERE embedding IS NOT NULL"
+        params: list[str] = []
+        if mem_type:
+            sql += " AND type = ?"
+            params.append(mem_type)
+        rows = self._db.execute(sql, params).fetchall()
         scores: dict[str, float] = {}
-        for slug, blob, updated in rows:
+        for slug, mtype, blob, updated in rows:
             emb = _unpack_embedding(blob)
             sim = _cosine_similarity(query_embedding, emb)
-            decay = _temporal_decay(updated, self._halflife)
+            decay = _temporal_decay(updated, self._halflife, mem_type=mtype)
             scores[slug] = max(0.0, sim) * decay
         return scores
 

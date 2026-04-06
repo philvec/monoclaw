@@ -33,7 +33,9 @@ _EXTRACT_MEMORIES_PROMPT = """\
 Review the conversation and list facts worth remembering for future sessions.
 If a slug from the existing index covers the same topic, reuse that slug (this updates it).
 
-Each memory needs: slug (lowercase-hyphens), type (user/project/reference/feedback), content (the fact).
+Each memory needs: slug (lowercase-hyphens), type, content.
+Types: user (preferences), project (ongoing work), reference (facts), \
+feedback (behavior corrections), skill (procedures/workflows).
 
 Current memory index:
 {index}
@@ -46,7 +48,9 @@ _FLUSH_MEMORIES_PROMPT = """\
 The conversation is about to be summarized. Save any important facts that should persist.
 Reuse existing slugs to update; use new slugs for new facts.
 
-Each memory needs: slug (lowercase-hyphens), type (user/project/reference/feedback), content (the fact).
+Each memory needs: slug (lowercase-hyphens), type, content.
+Types: user (preferences), project (ongoing work), reference (facts), \
+feedback (behavior corrections), skill (procedures/workflows).
 
 Current memory index:
 {index}
