@@ -24,6 +24,7 @@ class LLMConfig(BaseModel):
     base_url: str = "http://localhost:8080/v1"
     embeddings_url: str = ""  # separate embedding server; falls back to base_url if empty
     max_tokens: int = 4096
+    max_context: int = 32768  # practical context limit for compaction (0 = use model's reported window)
     compaction_threshold: float = 0.85
     enable_thinking: bool = True
 

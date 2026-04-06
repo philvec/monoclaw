@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from config import logger, ToolsConfig, SYSERR
+from config import logger, ToolsConfig
 from llm import LLMClient
 from memory_store import MemoryStore, MemoryEntry
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionUserMessageParam
@@ -18,9 +18,8 @@ You have have access to context AND memory; if prior context is visible in the c
 After each turn, key facts are automatically extracted and saved to long-term memory \
 (you will see [MEMORY SAVED] notes in the conversation when this happens).
 
-Your long-term memory index is loaded below. It lists all stored memories by slug and one-line description. \
-For full details on any memory, use memory_read with its slug. \
-To find relevant memories not in the index, use memory_search with keywords — it searches across all memory content. \
+You have long-term memory accessible via tools. \
+Use memory_search to find relevant memories by keyword. Use memory_read to get full content by slug. \
 Before answering questions about prior context, preferences, or decisions, search your memory.
 
 You may have access to tools for file operations, shell execution, web search, and web fetch.
@@ -93,17 +92,8 @@ class MemoryManager:
         self._store = store
 
     def build_system_prompt(self) -> str:
-        """Concatenate memory index → base instructions."""
-        parts: list[str] = [_BASE_SYSTEM_PROMPT]
-        try:
-            index = self._store.generate_index_md()
-            if index:
-                parts.append(index.strip())
-        except Exception as exc:
-            logger.error(err := f"failed to generate memory index: {exc}")
-            parts.append(f"[{SYSERR} — memory index unavailable ({err})]")
-
-        return "\n\n---\n\n".join(p for p in parts if p)
+        """Return static system prompt. Memory is accessed via tools, not injected."""
+        return _BASE_SYSTEM_PROMPT
 
     async def extract_memories(
         self, conversation: list[ChatCompletionMessageParam]

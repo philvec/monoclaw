@@ -81,11 +81,12 @@ class LLMClient:
         tools: list[dict] | None = None,
         on_delta: Callable[[str], Awaitable[None]] | None = None,
         response_model: type[BaseModel] | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {
             "model": "local",  # llama.cpp ignores this field
             "messages": messages,
-            "max_tokens": self._cfg.max_tokens,
+            "max_tokens": max_tokens or self._cfg.max_tokens,
             "stream": True,
             "extra_body": {"chat_template_kwargs": {"enable_thinking": self._cfg.enable_thinking}},
         }

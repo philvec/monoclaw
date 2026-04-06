@@ -93,30 +93,20 @@ class ContextManager:
         llm: LLMClient,
         memory_flush_fn: Callable[[list[ChatCompletionMessageParam]], Awaitable] | None = None,
     ) -> list[ChatCompletionMessageParam]:
-        """Tiered compaction: microcompact → pre-flush → full LLM summary."""
+        """Compaction: pre-flush → microcompact the half being summarized → full LLM summary."""
         if len(history) < 4:
             return history
 
-        # tier 1: microcompact (no LLM call)
-        history = self.microcompact(history)
-
-        # check if microcompact freed enough space
-        estimated = self._estimate_tokens(history)
-        if estimated / self._window < self._compact_at:
-            logger.info("microcompact was sufficient, skipping full compaction")
-            self._used = 0
-            return history
-
-        # tier 2: pre-compaction memory flush
+        # tier 1: pre-compaction memory flush
         if memory_flush_fn is not None:
             try:
                 await memory_flush_fn(history)
             except Exception as exc:
                 logger.error(f"pre-compaction memory flush failed: {exc}")
 
-        # tier 3: full LLM summary
+        # tier 2: split history, microcompact only the half being summarized
         mid = len(history) // 2
-        to_summarise = history[:mid]
+        to_summarise = self.microcompact(history[:mid])
         keep = history[mid:]
 
         summary_messages: list[ChatCompletionMessageParam] = [

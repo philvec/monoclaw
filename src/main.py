@@ -27,8 +27,11 @@ async def main() -> None:
     )
     memory = MemoryManager(llm, cfg.tools, store)
 
+    model_ctx = await llm.fetch_context_window()
+    context_limit = cfg.llm.max_context if cfg.llm.max_context > 0 else model_ctx
+    logger.info(f"context limit: {context_limit} (model reports {model_ctx})")
     ctx = ContextManager(
-        await llm.fetch_context_window(),
+        context_limit,
         cfg.llm.compaction_threshold,
         keep_recent=cfg.tools.memory_keep_recent,
     )
@@ -37,6 +40,7 @@ async def main() -> None:
     tool_registry = ToolRegistry.from_config(cfg, cron, channel_manager, store, llm)
 
     agent = AgentLoop(llm, tool_registry, memory, ctx, channel_manager)
+    await agent.startup()
 
     # optional: scheduled memory consolidation
     if cfg.tools.memory_consolidation_cron:
