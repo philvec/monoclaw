@@ -12,6 +12,7 @@ dependencies = [
     "markdownify==1.2.2",
     "json-repair==0.58.7",
     "websockets==14.2",
+    "numpy>=1.26",
 ]
 
 [dependency-groups]

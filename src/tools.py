@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 
 from channels import WebSocketChannelManager
 from config import Config, logger
+from llm import LLMClient
+from memory_store import MemoryStore
 
 from datetime import datetime, timezone
 from scheduler import CronSchedule, CronService
@@ -69,7 +71,10 @@ class ToolRegistry:
         self._tools: dict[str, Tool[Any]] = {}
 
     @classmethod
-    def from_config(cls, cfg: Config, cron: CronService, channel_manager: WebSocketChannelManager) -> "ToolRegistry":
+    def from_config(
+        cls, cfg: Config, cron: CronService, channel_manager: WebSocketChannelManager,
+        memory_store: MemoryStore, llm: LLMClient,
+    ) -> "ToolRegistry":
         registry = cls()
         for tool in cast(
             list[Tool[Any]],
@@ -85,6 +90,9 @@ class ToolRegistry:
                 ScheduleTool(cfg, cron),
                 SetOutputChannelTool(cfg, channel_manager),
                 ListOutputChannelsTool(cfg, channel_manager),
+                MemorySearchTool(cfg, memory_store, llm),
+                MemoryReadTool(cfg, memory_store),
+                MasterMemoryTool(cfg, memory_store),
             ],
         ):
             registry.register(tool)
@@ -450,3 +458,73 @@ class ListOutputChannelsTool(Tool["ListOutputChannelsTool.Params"]):
         if not names:
             return "no output channels available"
         return "\n".join(names)
+
+
+class MemorySearchTool(Tool["MemorySearchTool.Params"]):
+    """Search long-term memories. Returns ranked results with snippets. Hybrid keyword + semantic search."""
+
+    def __init__(self, cfg: Config, store: MemoryStore, llm: LLMClient) -> None:
+        super().__init__(cfg)
+        self._store = store
+        self._llm = llm
+
+    class Params(BaseModel):
+        query: str = Field(description="Search keywords or phrase")
+        limit: int = Field(default=10, description="Max results to return")
+        type: str = Field(default="", description="Filter by type: user/project/reference/feedback/skill (empty = all)")
+
+    async def execute(self, params: Params) -> str:  # type: ignore[override]
+        query_embedding = await self._llm.embed(params.query)
+        mem_type = params.type if params.type else None
+        results = self._store.search(params.query, query_embedding=query_embedding,
+                                     limit=params.limit, mem_type=mem_type)
+        if not results:
+            return "no matching memories"
+        lines = []
+        for r in results:
+            lines.append(f"**{r.slug}** [{r.type}] (score: {r.score:.2f})")
+            lines.append(f"  {r.snippet}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
+
+class MemoryReadTool(Tool["MemoryReadTool.Params"]):
+    """Read the full content of a specific memory by its slug."""
+
+    def __init__(self, cfg: Config, store: MemoryStore) -> None:
+        super().__init__(cfg)
+        self._store = store
+
+    class Params(BaseModel):
+        slug: str = Field(description="Memory slug identifier")
+
+    async def execute(self, params: Params) -> str:  # type: ignore[override]
+        entry = self._store.get(params.slug)
+        if entry is None:
+            return f"memory not found: {params.slug}"
+        return (
+            f"**{entry.slug}** [{entry.type}]\n"
+            f"Created: {entry.created.isoformat()} | Updated: {entry.updated.isoformat()}\n\n"
+            f"{entry.content}"
+        )
+
+
+class MasterMemoryTool(Tool["MasterMemoryTool.Params"]):
+    """Read or update master memory — core identity and instructions always in the system prompt. \
+Use for: user name, language, timezone, key behavioral rules, critical context. \
+Only update when the user explicitly asks. Changes affect every future turn."""
+
+    def __init__(self, cfg: Config, store: MemoryStore) -> None:
+        super().__init__(cfg)
+        self._store = store
+
+    class Params(BaseModel):
+        action: Literal["read", "write"] = Field(description="'read' to view, 'write' to replace")
+        content: str = Field(default="", description="New content (only for write)")
+
+    async def execute(self, params: Params) -> str:  # type: ignore[override]
+        if params.action == "read":
+            text = self._store.read_master_memory()
+            return text if text else "(master memory is empty)"
+        self._store.write_master_memory(params.content)
+        return f"master memory updated ({len(params.content)} chars)"

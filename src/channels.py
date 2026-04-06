@@ -6,7 +6,6 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import websockets
-import websockets.exceptions
 from pydantic import BaseModel
 
 from config import CRON_CHANNEL, WS_HOST, WS_PORT, logger

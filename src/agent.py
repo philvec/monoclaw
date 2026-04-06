@@ -51,9 +51,20 @@ class AgentLoop:
         self._channel_manager = channel_manager
         self._session = Session()
 
+    async def startup(self) -> None:
+        """Restore checkpoint and pre-warm the LLM cache."""
+        try:
+            self._session.history = self._restore_checkpoint()
+        except Exception as exc:
+            logger.error(f"failed to restore checkpoint on startup: {exc}")
+        if self._session.history:
+            logger.info(f"restored {len(self._session.history)} messages, warming cache")
+            await self._warm_cache()
+
     # Public entry points
 
     async def handle_message(self, msg: InboundMessage) -> None:
+        logger.info(f"acquiring session lock for {msg.channel}")
         async with self._session.lock:
             await self._process(msg)
 
@@ -72,7 +83,7 @@ class AgentLoop:
             )
         ]
 
-        # Restore checkpoint from disk on first turn
+        # Restore checkpoint from disk on first turn (skipped if startup() already ran)
         if not self._session.history:
             try:
                 self._session.history = self._restore_checkpoint()
@@ -84,13 +95,16 @@ class AgentLoop:
                         content=f"[{SYSERR} — running turn with empty history ({err})]",
                     )
                 )
-
-        # Always extend messages with accumulated history
         messages.extend(self._session.history)
 
         # Inject channel context as a user note (system role not allowed mid-conversation)
         expected_output = self._channel_manager.resolve_output(msg.channel)
-        ctx_lines = [f"INPUT CHANNEL: {msg.channel}", f"CURRENTLY_SET_OUTPUT_CHANNEL: {expected_output}"]
+        now = datetime.now(timezone.utc).astimezone()
+        ctx_lines = [
+            f"INPUT CHANNEL: {msg.channel}",
+            f"CURRENTLY_SET_OUTPUT_CHANNEL: {expected_output}",
+            f"CURRENT DATETIME: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+        ]
         messages.append(ChatCompletionUserMessageParam(role="user", content="\n".join(ctx_lines)))
         user_msg = ChatCompletionUserMessageParam(role="user", content=msg.text)
         messages.append(user_msg)
@@ -119,6 +133,7 @@ class AgentLoop:
         while iterations < _MAX_TOOL_ITERATIONS:
             iterations += 1
 
+            logger.info(f"llm call start (iter={iterations}, msgs={len(messages)})")
             response = await self._llm.chat(messages, tools=self._tool_registry.definitions, on_delta=_on_delta)
             self._ctx.update(response)
 
@@ -218,8 +233,29 @@ class AgentLoop:
             return
         async with self._session.lock:
             self._archive_checkpoint(self._session.history)
-            self._session.history = await self._ctx.compact(self._session.history, self._llm)
+            self._session.history = await self._ctx.compact(
+                self._session.history, self._llm,
+                memory_flush_fn=self._memory.flush_memories,
+            )
             self._save_checkpoint()
+        # pre-warm the LLM cache with the compacted history
+        asyncio.create_task(self._warm_cache(), name="warm-cache")
+
+    async def _warm_cache(self) -> None:
+        """Send a minimal request to prefill the LLM cache with current history."""
+        try:
+            messages: list[ChatCompletionMessageParam] = [
+                ChatCompletionSystemMessageParam(
+                    role="system",
+                    content=self._memory.build_system_prompt(),
+                ),
+                *self._session.history,
+                ChatCompletionUserMessageParam(role="user", content="."),
+            ]
+            await self._llm.chat(messages, max_tokens=1)
+            logger.info("cache pre-warmed after compaction")
+        except Exception as exc:
+            logger.error(f"cache warm-up failed: {exc}")
 
     def _archive_checkpoint(self, history: list[ChatCompletionMessageParam]) -> None:
         if not history:
@@ -233,12 +269,14 @@ class AgentLoop:
 
     async def _run_extract_memories(self, history: list[ChatCompletionMessageParam]) -> None:
         try:
-            entries = await self._memory.extract_memories(history)
-            if entries:
+            ops = await self._memory.extract_memories(history)
+            if ops:
                 self._append_to_checkpoint(
                     ChatCompletionUserMessageParam(
                         role="user",
-                        content="[MEMORY SAVED]\n" + "\n".join(f"- {e}" for e in entries),
+                        content="[MEMORY SAVED]\n" + "\n".join(
+                            f"- {op.slug} ({op.type})" for op in ops
+                        ),
                     ),
                 )
         except Exception as exc:
