@@ -8,6 +8,7 @@ from channels import InboundMessage, WebSocketChannelManager
 from config import load_config, logger
 from context import ContextManager
 from llm import LLMClient
+from mcp_client import MCPClient
 from memory import MemoryManager
 from memory_store import MemoryStore
 from scheduler import CronService, CronSchedule
@@ -38,6 +39,10 @@ async def main() -> None:
     cron = CronService()
     channel_manager = WebSocketChannelManager()
     tool_registry = ToolRegistry.from_config(cfg, cron, channel_manager, store, llm)
+
+    mcp = MCPClient(cfg.mcp)
+    await mcp.start()
+    tool_registry.attach_mcp(mcp)
 
     agent = AgentLoop(llm, tool_registry, memory, ctx, channel_manager)
     await agent.startup()
@@ -70,7 +75,7 @@ async def main() -> None:
 
     def _shutdown() -> None:
         logger.info("shutdown signal received")
-        loop.create_task(_cleanup(cron))
+        loop.create_task(_cleanup(cron, mcp))
 
     for sig in (_signal.SIGINT, _signal.SIGTERM):
         try:
@@ -83,8 +88,9 @@ async def main() -> None:
     await asyncio.Event().wait()  # block until shutdown signal
 
 
-async def _cleanup(cron: CronService) -> None:
+async def _cleanup(cron: CronService, mcp: MCPClient) -> None:
     await cron.stop()
+    await mcp.stop()
     sys.exit(0)
 
 

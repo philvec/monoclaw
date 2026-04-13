@@ -13,6 +13,7 @@ dependencies = [
     "json-repair==0.58.7",
     "websockets==14.2",
     "numpy>=1.26",
+    "mcp>=1.0.0",
 ]
 
 [dependency-groups]
