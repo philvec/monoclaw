@@ -69,11 +69,18 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool[Any]] = {}
+        self._mcp_client: Any = None
+        self._mcp_schemas: list[dict] = []
+        self._mcp_names: set[str] = set()
 
     @classmethod
     def from_config(
-        cls, cfg: Config, cron: CronService, channel_manager: WebSocketChannelManager,
-        memory_store: MemoryStore, llm: LLMClient,
+        cls,
+        cfg: Config,
+        cron: CronService,
+        channel_manager: WebSocketChannelManager,
+        memory_store: MemoryStore,
+        llm: LLMClient,
     ) -> "ToolRegistry":
         registry = cls()
         for tool in cast(
@@ -98,6 +105,11 @@ class ToolRegistry:
             registry.register(tool)
         return registry
 
+    def attach_mcp(self, client: Any) -> None:
+        self._mcp_client = client
+        self._mcp_schemas = client.tool_schemas
+        self._mcp_names = {s["function"]["name"] for s in self._mcp_schemas}
+
     def register(self, tool: Tool[Any]) -> None:
         self._tools[tool.name] = tool
 
@@ -106,23 +118,25 @@ class ToolRegistry:
 
     @property
     def definitions(self) -> list[dict]:
-        return [t.to_schema() for t in self._tools.values()]
+        return [t.to_schema() for t in self._tools.values()] + self._mcp_schemas
 
     async def execute(self, name: str, arguments: dict) -> str:
-        if name not in self._tools:
-            return f"unknown tool: {name!r}"
-        tool = self._tools[name]
-        try:
-            result = await tool.execute(tool.Params.model_validate(arguments))
-        except Exception as exc:
-            logger.exception(f"tool {name!r} raised")
-            return f"error: {exc}"
-        if isinstance(result, str):
-            return result
-        try:
-            return json.dumps(result)
-        except (TypeError, ValueError):
-            return str(result)
+        if name in self._tools:
+            tool = self._tools[name]
+            try:
+                result = await tool.execute(tool.Params.model_validate(arguments))
+            except Exception as exc:
+                logger.exception(f"tool {name!r} raised")
+                return f"error: {exc}"
+            if isinstance(result, str):
+                return result
+            try:
+                return json.dumps(result)
+            except (TypeError, ValueError):
+                return str(result)
+        if self._mcp_client is not None and name in self._mcp_names:
+            return await self._mcp_client.execute(name, arguments)
+        return f"unknown tool: {name!r}"
 
 
 def _safe_path(rel: str) -> Path:
@@ -476,8 +490,9 @@ class MemorySearchTool(Tool["MemorySearchTool.Params"]):
     async def execute(self, params: Params) -> str:  # type: ignore[override]
         query_embedding = await self._llm.embed(params.query)
         mem_type = params.type if params.type else None
-        results = self._store.search(params.query, query_embedding=query_embedding,
-                                     limit=params.limit, mem_type=mem_type)
+        results = self._store.search(
+            params.query, query_embedding=query_embedding, limit=params.limit, mem_type=mem_type
+        )
         if not results:
             return "no matching memories"
         lines = []

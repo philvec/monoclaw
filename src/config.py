@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel
@@ -41,9 +41,19 @@ class ToolsConfig(BaseModel):
     memory_consolidation_cron: str = ""
 
 
+class MCPServerConfig(BaseModel):
+    name: str
+    transport: Literal["stdio", "sse", "http"] = "stdio"
+    command: str = ""
+    args: list[str] = []
+    env: dict[str, str] = {}
+    url: str = ""
+
+
 class Config(BaseSettings):
     llm: LLMConfig = LLMConfig()
     tools: ToolsConfig = ToolsConfig()
+    mcp: list[MCPServerConfig] = []
 
     model_config = SettingsConfigDict(
         env_nested_delimiter="__",

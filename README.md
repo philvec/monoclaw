@@ -4,7 +4,7 @@
 
 Personal AI assistant with one continuous session, WebSocket-native multi-channel interaction, minimal codebase for clarity and security.
 
-**codebase:** `2175 lines across 10 files`
+**codebase:** `2328 lines across 11 files`
 
 ---
 
@@ -73,6 +73,15 @@ tools:
   memory_embedding_weight: 0.6      # vector vs keyword balance (0 = FTS only, 1 = vector only)
   memory_mmr_lambda: 0.7            # relevance vs diversity in results
   memory_consolidation_cron: ""     # e.g. "0 3 * * *" for daily consolidation
+
+mcp:
+  - name: filesystem             # tools exposed as filesystem__<tool_name>
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/data/workspace"]
+  - name: my-api
+    transport: sse                          # or "http" for streamable-http
+    url: http://my-mcp-server:8000/sse
 ```
 
 **2. Build and run**
