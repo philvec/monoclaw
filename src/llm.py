@@ -88,6 +88,7 @@ class LLMClient:
             "messages": messages,
             "max_tokens": max_tokens or self._cfg.max_tokens,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "extra_body": {"chat_template_kwargs": {"enable_thinking": self._cfg.enable_thinking}},
         }
         if tools:

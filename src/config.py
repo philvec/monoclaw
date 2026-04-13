@@ -25,7 +25,7 @@ class LLMConfig(BaseModel):
     embeddings_url: str = ""  # separate embedding server; falls back to base_url if empty
     max_tokens: int = 4096
     max_context: int = 32768  # practical context limit for compaction (0 = use model's reported window)
-    compaction_threshold: float = 0.85
+    compaction_keep_ratio: float = 0.25  # fraction of history to keep after compaction (rest is summarized)
     enable_thinking: bool = True
 
 

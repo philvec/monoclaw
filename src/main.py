@@ -32,8 +32,8 @@ async def main() -> None:
     logger.info(f"context limit: {context_limit} (model reports {model_ctx})")
     ctx = ContextManager(
         context_limit,
-        cfg.llm.compaction_threshold,
         keep_recent=cfg.tools.memory_keep_recent,
+        keep_ratio=cfg.llm.compaction_keep_ratio,
     )
     cron = CronService()
     channel_manager = WebSocketChannelManager()
