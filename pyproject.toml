@@ -9,7 +9,6 @@ dependencies = [
     "pyyaml==6.0.3",
     "httpx==0.28.1",
     "croniter==6.2.2",
-    "markdownify==1.2.2",
     "json-repair==0.58.7",
     "websockets==14.2",
     "numpy>=1.26",

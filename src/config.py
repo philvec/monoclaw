@@ -30,7 +30,6 @@ class LLMConfig(BaseModel):
 
 
 class ToolsConfig(BaseModel):
-    brave_api_key: str = ""
     exec_timeout_max_s: int = 600
     memory_ctx_trunc_n: int = 20
     memory_msg_max_len: int = 500
@@ -54,6 +53,7 @@ class Config(BaseSettings):
     llm: LLMConfig = LLMConfig()
     tools: ToolsConfig = ToolsConfig()
     mcp: list[MCPServerConfig] = []
+    monoclaw_tools_url: str = ""  # shorthand: auto-registers monoclaw-tools sidecar when set
 
     model_config = SettingsConfigDict(
         env_nested_delimiter="__",
@@ -64,4 +64,12 @@ class Config(BaseSettings):
 def load_config(path: str = "config.yaml") -> Config:
     p = Path(path)
     data: dict[str, Any] = yaml.safe_load(p.read_text()) or {} if p.exists() else {}  # falls back to env vars only
-    return Config(**data)
+    cfg = Config(**data)
+    if cfg.monoclaw_tools_url:
+        if any(s.name == "tools" for s in cfg.mcp):
+            logger.warning(
+                "MONOCLAW_TOOLS_URL is set but an MCP server named 'tools' already exists in config — not adding"
+            )
+        else:
+            cfg.mcp.insert(0, MCPServerConfig(name="tools", transport="http", url=cfg.monoclaw_tools_url))
+    return cfg

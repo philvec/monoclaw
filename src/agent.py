@@ -234,7 +234,8 @@ class AgentLoop:
         async with self._session.lock:
             self._archive_checkpoint(self._session.history)
             self._session.history = await self._ctx.compact(
-                self._session.history, self._llm,
+                self._session.history,
+                self._llm,
                 memory_flush_fn=self._memory.flush_memories,
             )
             self._save_checkpoint()
@@ -275,9 +276,7 @@ class AgentLoop:
                 self._append_to_checkpoint(
                     ChatCompletionUserMessageParam(
                         role="user",
-                        content="[MEMORY SAVED]\n" + "\n".join(
-                            f"- {op.slug} ({op.type})" for op in ops
-                        ),
+                        content="[MEMORY SAVED]\n" + "\n".join(f"- {op.slug} ({op.type})" for op in ops),
                     ),
                 )
         except Exception as exc:

@@ -4,11 +4,11 @@
 
 Personal AI assistant with one continuous session, WebSocket-native multi-channel interaction, minimal codebase for clarity and security.
 
-**codebase:** `2328 lines across 11 files`
+**codebase:** `2350 lines across 13 files (src/*.py, Dockerfile, pyproject.toml)`
 
 ---
 
-- agent turn loop, tool base class + registry, file/shell/web tools, `CronService` — rewritten in Python based on [NanoClaw](https://github.com/qwibitai/nanoclaw)
+- agent turn loop, tool base class + registry, file/shell tools, `CronService` — rewritten in Python based on [NanoClaw](https://github.com/qwibitai/nanoclaw)
 - structured memory with hybrid search, tiered compaction — inspired by [free-code](https://github.com/paoloanzn/free-code) and [OpenClaw](https://github.com/openclaw/openclaw)
 - massive open-source codebase, unreviewed community contributions, security vulnerabilities nobody can trace — graciously avoided thanks to [OpenClaw](https://github.com/openclaw/openclaw)
 
@@ -22,6 +22,7 @@ Personal AI assistant with one continuous session, WebSocket-native multi-channe
 - **Automatic post-turn extraction** — after each response, the LLM extracts memorable facts and saves them with embeddings. Existing memories are updated, not duplicated.
 - **Tiered compaction** — microcompact (archive and truncate old tool results) → pre-compaction memory flush → full LLM summary. Fire-and-forget after response delivery.
 - **Container-as-deployment isolation** — security comes from container isolation, not application-level sandboxing. The agent process itself runs in Docker; tools operate under `data/workspace/` directly. Single WebSocket entrypoint — extension and security is shifted to proxies managed aside.
+- **Minimal core** — auxiliary tools (web search, web fetch, home automation, etc.) are kept out of this repo. They live in [monoclaw-tools](https://github.com/philvec/monoclaw-tools), a companion MCP server that attaches as a sidecar.
 
 ---
 
@@ -60,7 +61,7 @@ A bridge connects to monoclaw via WebSocket on port `8765`.
 
 monoclaw runs as a single Docker container. Bridges run separately and connect to it.
 
-**1. Configure** (optional — all fields have defaults; env vars also work via `LLM__BASE_URL` etc.)
+**1. Configure** (optional — all fields have defaults; env vars also work via `LLM__BASE_URL` etc.; `MONOCLAW_TOOLS_URL` auto-registers the monoclaw-tools sidecar)
 
 ```yaml
 llm:
@@ -75,12 +76,15 @@ tools:
   memory_consolidation_cron: ""     # e.g. "0 3 * * *" for daily consolidation
 
 mcp:
+  - name: tools                  # monoclaw-tools sidecar (github.com/philvec/monoclaw-tools)
+    transport: http
+    url: http://monoclaw-tools:8766/mcp
   - name: filesystem             # tools exposed as filesystem__<tool_name>
     transport: stdio
     command: npx
     args: ["-y", "@modelcontextprotocol/server-filesystem", "/data/workspace"]
   - name: my-api
-    transport: sse                          # or "http" for streamable-http
+    transport: sse
     url: http://my-mcp-server:8000/sse
 ```
 
@@ -101,19 +105,9 @@ docker run -d \
 
 ## Adding a tool
 
-Subclass `Tool` and implement `Params` (Pydantic model) and `execute`:
+For auxiliary tools (web search, home automation, APIs, etc.), the right place is [monoclaw-tools](https://github.com/philvec/monoclaw-tools) — a companion MCP sidecar that attaches without touching this repo.
 
-```python
-class MyTool(Tool["MyTool.Params"]):
-    """Docstring becomes the tool's description for LLM."""
-    class Params(BaseModel):
-        input: str
-
-    async def execute(self, params: Params) -> str:
-        return f"result: {params.input}"
-```
-
-Register it in `ToolRegistry.from_config`. The schema is generated automatically and exposed to the LLM.
+For tools that need deep integration with monoclaw internals (session history, compaction, channel management), subclass `Tool`, implement `Params` (Pydantic model) and `execute`, then register in `ToolRegistry.from_config`. The schema is generated automatically and exposed to the LLM.
 
 ## Swapping the LLM
 

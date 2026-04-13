@@ -23,8 +23,7 @@ _TOOL_RESULTS_ARCHIVE = Path("./data/archive/tool_results")
 
 
 class ContextManager:
-    def __init__(self, context_window: int, keep_recent: int = 10,
-                 keep_ratio: float = 0.25) -> None:
+    def __init__(self, context_window: int, keep_recent: int = 10, keep_ratio: float = 0.25) -> None:
         self._window = context_window
         self._keep_recent = keep_recent
         self._keep_ratio = keep_ratio
@@ -38,9 +37,7 @@ class ContextManager:
 
     # ── tier 1: microcompact ──
 
-    def microcompact(
-        self, history: list[ChatCompletionMessageParam]
-    ) -> list[ChatCompletionMessageParam]:
+    def microcompact(self, history: list[ChatCompletionMessageParam]) -> list[ChatCompletionMessageParam]:
         """Truncate old tool results to save tokens. No LLM call needed."""
         if len(history) < self._keep_recent + 2:
             return history
@@ -53,11 +50,13 @@ class ContextManager:
             if i < boundary and msg.get("role") == "tool":
                 content = str(msg.get("content", ""))
                 if len(content) > 200:
-                    archived.append({
-                        "tool_call_id": msg.get("tool_call_id", ""),
-                        "content": content,
-                        "archived_at": datetime.now(timezone.utc).isoformat(),
-                    })
+                    archived.append(
+                        {
+                            "tool_call_id": msg.get("tool_call_id", ""),
+                            "content": content,
+                            "archived_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
                     truncated = content[:100] + "..."
                     result.append({**msg, "content": truncated})  # type: ignore[arg-type]
                     continue
@@ -113,9 +112,7 @@ class ContextManager:
             logger.warning(f"compaction LLM call failed: {exc}")
             summary = "(compaction failed — prior context truncated)"
 
-        compacted_system = ChatCompletionUserMessageParam(
-            role="user", content=f"[Compacted context summary]\n{summary}"
-        )
+        compacted_system = ChatCompletionUserMessageParam(role="user", content=f"[Compacted context summary]\n{summary}")
         result = [compacted_system, *keep]
         logger.info(f"compacted {len(to_summarise)} messages → 1 summary + {len(keep)} kept")
         self._used = 0

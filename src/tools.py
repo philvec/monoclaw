@@ -3,10 +3,8 @@ import json
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Generic, Literal, TypeVar, cast
+from typing import Any, Generic, Literal, TypeVar
 
-import httpx
-from markdownify import markdownify
 from pydantic import BaseModel, Field
 
 from channels import WebSocketChannelManager
@@ -83,25 +81,21 @@ class ToolRegistry:
         llm: LLMClient,
     ) -> "ToolRegistry":
         registry = cls()
-        for tool in cast(
-            list[Tool[Any]],
-            [
-                ReadFileTool(cfg),
-                WriteFileTool(cfg),
-                EditFileTool(cfg),
-                GlobTool(cfg),
-                GrepTool(cfg),
-                ShellTool(cfg),
-                WebSearchTool(cfg),
-                WebFetchTool(cfg),
-                ScheduleTool(cfg, cron),
-                SetOutputChannelTool(cfg, channel_manager),
-                ListOutputChannelsTool(cfg, channel_manager),
-                MemorySearchTool(cfg, memory_store, llm),
-                MemoryReadTool(cfg, memory_store),
-                MasterMemoryTool(cfg, memory_store),
-            ],
-        ):
+        tools: list[Tool[Any]] = [
+            ReadFileTool(cfg),
+            WriteFileTool(cfg),
+            EditFileTool(cfg),
+            GlobTool(cfg),
+            GrepTool(cfg),
+            ShellTool(cfg),
+            ScheduleTool(cfg, cron),
+            SetOutputChannelTool(cfg, channel_manager),
+            ListOutputChannelsTool(cfg, channel_manager),
+            MemorySearchTool(cfg, memory_store, llm),
+            MemoryReadTool(cfg, memory_store),
+            MasterMemoryTool(cfg, memory_store),
+        ]
+        for tool in tools:
             registry.register(tool)
         return registry
 
@@ -311,64 +305,6 @@ def _truncate(text: str, max_chars: int = 10_000) -> str:
         return text
     half = max_chars // 2
     return text[:half] + f"\n...[truncated {len(text) - max_chars} chars]...\n" + text[-half:]
-
-
-class WebSearchTool(Tool["WebSearchTool.Params"]):
-    """Search the web and return a summary of results."""
-
-    class Params(BaseModel):
-        query: str
-        count: int = Field(default=5, description="Number of results")
-
-    async def execute(self, params: Params) -> str:  # type: ignore[override]
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    params={"q": params.query, "count": params.count},
-                    headers={"Accept": "application/json", "X-Subscription-Token": self._cfg.tools.brave_api_key},
-                    timeout=10.0,
-                )
-                resp.raise_for_status()
-                results = resp.json().get("web", {}).get("results", [])
-                return self._format_results(results)
-        except Exception as exc:
-            return f"search error: {exc}"
-
-    @staticmethod
-    def _format_results(results: list[dict]) -> str:
-        if not results:
-            return "no results"
-        lines = []
-        for r in results:
-            lines.append(f"[{r.get('title', '')}]({r.get('url', '')})")
-            snippet = r.get("description", "")
-            if snippet:
-                lines.append(snippet)
-            lines.append("")
-        return "\n".join(lines).strip()
-
-
-class WebFetchTool(Tool["WebFetchTool.Params"]):
-    """Fetch a URL and return its content as markdown."""
-
-    class Params(BaseModel):
-        url: str
-        max_chars: int = Field(default=20_000, description="Max chars to return (default 20000)")
-
-    async def execute(self, params: Params) -> str:  # type: ignore[override]
-        try:
-            async with httpx.AsyncClient(follow_redirects=True, max_redirects=5) as client:
-                resp = await client.get(params.url, timeout=15.0, headers={"User-Agent": "monoclaw/1.0"})
-                resp.raise_for_status()
-                ct = resp.headers.get("content-type", "")
-                if "html" in ct:
-                    text = markdownify(resp.text, strip=["script", "style"])
-                else:
-                    text = resp.text
-            return _truncate(text, params.max_chars)
-        except Exception as exc:
-            return f"fetch error: {exc}"
 
 
 class ScheduleTool(Tool["ScheduleTool.Params"]):

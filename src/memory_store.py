@@ -18,11 +18,11 @@ _MEMORY_TYPES = ("user", "feedback", "project", "reference", "skill")
 
 # per-type temporal decay half-life in days (0 = no decay)
 _TYPE_HALFLIFE: dict[str, int] = {
-    "user": 365,       # preferences change slowly
-    "feedback": 180,   # behavior corrections fade slowly
-    "project": 14,     # ongoing work goes stale fast
-    "reference": 0,    # facts don't age
-    "skill": 0,        # procedures stay valid until updated
+    "user": 365,  # preferences change slowly
+    "feedback": 180,  # behavior corrections fade slowly
+    "project": 14,  # ongoing work goes stale fast
+    "reference": 0,  # facts don't age
+    "skill": 0,  # procedures stay valid until updated
 }
 
 
@@ -120,8 +120,9 @@ _MASTER_MEMORY_FILE = "MASTER.md"
 
 
 class MemoryStore:
-    def __init__(self, base_path: Path, halflife_days: int = 30,
-                 embedding_weight: float = 0.6, mmr_lambda: float = 0.7) -> None:
+    def __init__(
+        self, base_path: Path, halflife_days: int = 30, embedding_weight: float = 0.6, mmr_lambda: float = 0.7
+    ) -> None:
         self._base = base_path
         self._base.mkdir(parents=True, exist_ok=True)
         self._db_path = base_path / "search.db"
@@ -146,10 +147,8 @@ class MemoryStore:
         self._write_md_file(entry)
         blob = _pack_embedding(embedding) if embedding is not None else None
         self._db.execute(
-            "INSERT INTO memories (slug, type, content, created, updated, embedding) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (entry.slug, entry.type, entry.content,
-             entry.created.isoformat(), entry.updated.isoformat(), blob),
+            "INSERT INTO memories (slug, type, content, created, updated, embedding) " "VALUES (?, ?, ?, ?, ?, ?)",
+            (entry.slug, entry.type, entry.content, entry.created.isoformat(), entry.updated.isoformat(), blob),
         )
         self._db.commit()
 
@@ -159,8 +158,13 @@ class MemoryStore:
         if row is None:
             logger.warning(f"memory update: slug not found: {slug}")
             return
-        entry = MemoryEntry(slug=slug, type=row[0], content=content,
-                            created=datetime.fromisoformat(row[1]), updated=datetime.fromisoformat(now))
+        entry = MemoryEntry(
+            slug=slug,
+            type=row[0],
+            content=content,
+            created=datetime.fromisoformat(row[1]),
+            updated=datetime.fromisoformat(now),
+        )
         self._write_md_file(entry)
         blob = _pack_embedding(embedding) if embedding is not None else None
         if blob is not None:
@@ -188,16 +192,28 @@ class MemoryStore:
         ).fetchone()
         if row is None:
             return None
-        return MemoryEntry(slug=row[0], type=row[1], content=row[2],
-                           created=datetime.fromisoformat(row[3]), updated=datetime.fromisoformat(row[4]))
+        return MemoryEntry(
+            slug=row[0],
+            type=row[1],
+            content=row[2],
+            created=datetime.fromisoformat(row[3]),
+            updated=datetime.fromisoformat(row[4]),
+        )
 
     def list_all(self) -> list[MemoryEntry]:
         rows = self._db.execute(
             "SELECT slug, type, content, created, updated FROM memories ORDER BY updated DESC"
         ).fetchall()
-        return [MemoryEntry(slug=r[0], type=r[1], content=r[2],
-                            created=datetime.fromisoformat(r[3]), updated=datetime.fromisoformat(r[4]))
-                for r in rows]
+        return [
+            MemoryEntry(
+                slug=r[0],
+                type=r[1],
+                content=r[2],
+                created=datetime.fromisoformat(r[3]),
+                updated=datetime.fromisoformat(r[4]),
+            )
+            for r in rows
+        ]
 
     # ── master memory ──
 
@@ -213,8 +229,9 @@ class MemoryStore:
 
     # ── search ──
 
-    def search(self, query: str, query_embedding: np.ndarray | None = None,
-               limit: int = 10, mem_type: str | None = None) -> list[SearchResult]:
+    def search(
+        self, query: str, query_embedding: np.ndarray | None = None, limit: int = 10, mem_type: str | None = None
+    ) -> list[SearchResult]:
         # Step 1: FTS5 keyword candidates
         fts_results = self._fts_search(query, limit=limit * 3, mem_type=mem_type)
 
@@ -236,7 +253,7 @@ class MemoryStore:
 
     def _fts_search(self, query: str, limit: int, mem_type: str | None = None) -> list[dict]:
         # tokenize into individual terms joined by OR for broad matching
-        terms = [t.strip() for t in re.split(r'\s+', query.strip()) if t.strip()]
+        terms = [t.strip() for t in re.split(r"\s+", query.strip()) if t.strip()]
         if not terms:
             return []
         fts_query = " OR ".join(f'"{t.replace(chr(34), "")}"' for t in terms)
@@ -263,10 +280,15 @@ class MemoryStore:
         for r in rows:
             decay = _temporal_decay(r[2], self._halflife, mem_type=r[1])
             bm25_raw = abs(r[4])  # bm25 returns negative values (lower = better)
-            results.append({
-                "slug": r[0], "type": r[1],
-                "snippet": r[3], "bm25": bm25_raw, "decay": decay,
-            })
+            results.append(
+                {
+                    "slug": r[0],
+                    "type": r[1],
+                    "snippet": r[3],
+                    "bm25": bm25_raw,
+                    "decay": decay,
+                }
+            )
         # normalize bm25 scores to 0-1
         if results:
             max_bm25 = max(r["bm25"] for r in results) or 1.0
@@ -274,8 +296,7 @@ class MemoryStore:
                 r["bm25_norm"] = r["bm25"] / max_bm25
         return results
 
-    def _vector_scores(self, query_embedding: np.ndarray,
-                       mem_type: str | None = None) -> dict[str, float]:
+    def _vector_scores(self, query_embedding: np.ndarray, mem_type: str | None = None) -> dict[str, float]:
         sql = "SELECT slug, type, embedding, updated FROM memories WHERE embedding IS NOT NULL"
         params: list[str] = []
         if mem_type:
@@ -290,8 +311,7 @@ class MemoryStore:
             scores[slug] = max(0.0, sim) * decay
         return scores
 
-    def _hybrid_merge(self, fts_results: list[dict],
-                      vector_scores: dict[str, float]) -> list[SearchResult]:
+    def _hybrid_merge(self, fts_results: list[dict], vector_scores: dict[str, float]) -> list[SearchResult]:
         alpha = self._embedding_weight
         merged: dict[str, SearchResult] = {}
 
@@ -304,8 +324,10 @@ class MemoryStore:
             else:
                 score = bm25_score
             merged[slug] = SearchResult(
-                slug=slug, type=r["type"],
-                snippet=r["snippet"], score=score,
+                slug=slug,
+                type=r["type"],
+                snippet=r["snippet"],
+                score=score,
             )
 
         # add vector-only results not found by FTS
@@ -314,7 +336,8 @@ class MemoryStore:
                 entry = self.get(slug)
                 if entry:
                     merged[slug] = SearchResult(
-                        slug=slug, type=entry.type,
+                        slug=slug,
+                        type=entry.type,
                         snippet=entry.content[:80] + "..." if len(entry.content) > 80 else entry.content,
                         score=alpha * vec_score,
                     )
@@ -399,10 +422,8 @@ class MemoryStore:
                 entry = self._parse_md_file(md_file)
                 if entry:
                     self._db.execute(
-                        "INSERT INTO memories (slug, type, content, created, updated) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (entry.slug, entry.type, entry.content,
-                         entry.created.isoformat(), entry.updated.isoformat()),
+                        "INSERT INTO memories (slug, type, content, created, updated) " "VALUES (?, ?, ?, ?, ?)",
+                        (entry.slug, entry.type, entry.content, entry.created.isoformat(), entry.updated.isoformat()),
                     )
             except Exception as exc:
                 logger.warning(f"rebuild_index: failed to parse {md_file.name}: {exc}")

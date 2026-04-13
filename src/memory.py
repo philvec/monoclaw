@@ -102,15 +102,11 @@ class MemoryManager:
             return _BASE_SYSTEM_PROMPT + "\n\n---\n\n" + master
         return _BASE_SYSTEM_PROMPT
 
-    async def extract_memories(
-        self, conversation: list[ChatCompletionMessageParam]
-    ) -> list[MemoryOperation]:
+    async def extract_memories(self, conversation: list[ChatCompletionMessageParam]) -> list[MemoryOperation]:
         """Post-turn: extract and apply memory operations. Returns ops performed."""
         return await self._run_extraction(conversation, _EXTRACT_MEMORIES_PROMPT)
 
-    async def flush_memories(
-        self, conversation: list[ChatCompletionMessageParam]
-    ) -> list[MemoryOperation]:
+    async def flush_memories(self, conversation: list[ChatCompletionMessageParam]) -> list[MemoryOperation]:
         """Pre-compaction: aggressively save context before it's summarized away."""
         return await self._run_extraction(conversation, _FLUSH_MEMORIES_PROMPT)
 
@@ -126,9 +122,7 @@ class MemoryManager:
         index = self._store.generate_index_md() or "(no memories stored yet)"
         prompt = prompt_template.format(index=index, conversation=convo_text)
 
-        messages: list[ChatCompletionMessageParam] = [
-            ChatCompletionUserMessageParam(role="user", content=prompt)
-        ]
+        messages: list[ChatCompletionMessageParam] = [ChatCompletionUserMessageParam(role="user", content=prompt)]
         response = await self._llm.chat(messages, response_model=MemoryExtractionResponse)
         if not isinstance(response.parsed, MemoryExtractionResponse):
             raise ValueError(
@@ -166,15 +160,18 @@ class MemoryManager:
             return "update"
 
         entry = MemoryEntry(
-            slug=op.slug, type=op.type,
-            content=op.content, created=now, updated=now,
+            slug=op.slug,
+            type=op.type,
+            content=op.content,
+            created=now,
+            updated=now,
         )
         self._store.create(entry, embedding=embedding)
         return "create"
 
     def _format_conversation(self, messages: list[ChatCompletionMessageParam]) -> str:
         lines = []
-        for msg in messages[-self._cfg.memory_ctx_trunc_n:]:
+        for msg in messages[-self._cfg.memory_ctx_trunc_n :]:
             if content := msg.get("content", ""):
                 role = msg.get("role", "").upper()
                 lines.append(f"{role}: {str(content)[:self._cfg.memory_msg_max_len]}")
