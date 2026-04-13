@@ -23,18 +23,18 @@ _TOOL_RESULTS_ARCHIVE = Path("./data/archive/tool_results")
 
 
 class ContextManager:
-    def __init__(self, context_window: int, compaction_threshold: float,
-                 keep_recent: int = 10) -> None:
+    def __init__(self, context_window: int, keep_recent: int = 10,
+                 keep_ratio: float = 0.25) -> None:
         self._window = context_window
-        self._compact_at = compaction_threshold
         self._keep_recent = keep_recent
+        self._keep_ratio = keep_ratio
         self._used: int = 0
 
     def update(self, response: LLMResponse) -> None:
         self._used = response.input_tokens
 
     def should_compact(self) -> bool:
-        return self._used / self._window >= self._compact_at
+        return self._used > self._window
 
     # ── tier 1: microcompact ──
 
@@ -96,10 +96,11 @@ class ContextManager:
             except Exception as exc:
                 logger.error(f"pre-compaction memory flush failed: {exc}")
 
-        # tier 2: split history, microcompact only the half being summarized
-        mid = len(history) // 2
-        to_summarise = self.microcompact(history[:mid])
-        keep = history[mid:]
+        # tier 2: split history, microcompact the portion being summarized
+        keep_count = max(2, int(len(history) * self._keep_ratio))
+        split = len(history) - keep_count
+        to_summarise = self.microcompact(history[:split])
+        keep = history[split:]
 
         summary_messages: list[ChatCompletionMessageParam] = [
             ChatCompletionSystemMessageParam(role="system", content=_COMPACTION_PROMPT),

@@ -242,7 +242,7 @@ class AgentLoop:
         asyncio.create_task(self._warm_cache(), name="warm-cache")
 
     async def _warm_cache(self) -> None:
-        """Send a minimal request to prefill the LLM cache with current history."""
+        """Prefill the LLM cache with current history. Matches _process() message format."""
         try:
             messages: list[ChatCompletionMessageParam] = [
                 ChatCompletionSystemMessageParam(
@@ -250,10 +250,11 @@ class AgentLoop:
                     content=self._memory.build_system_prompt(),
                 ),
                 *self._session.history,
+                ChatCompletionUserMessageParam(role="user", content="INPUT CHANNEL: warmup"),
                 ChatCompletionUserMessageParam(role="user", content="."),
             ]
-            await self._llm.chat(messages, max_tokens=1)
-            logger.info("cache pre-warmed after compaction")
+            await self._llm.chat(messages, tools=self._tool_registry.definitions, max_tokens=1)
+            logger.info("cache pre-warmed")
         except Exception as exc:
             logger.error(f"cache warm-up failed: {exc}")
 
