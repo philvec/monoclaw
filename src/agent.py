@@ -204,7 +204,7 @@ class AgentLoop:
     def _save_checkpoint(self) -> None:
         try:
             _CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _CHECKPOINT_PATH.write_text("\n".join(json.dumps(m) for m in self._session.history))
+            _CHECKPOINT_PATH.write_text("\n".join(json.dumps(m) for m in self._session.history) + "\n")
         except Exception as exc:
             logger.error(f"failed to save checkpoint: {exc}")
 
@@ -265,7 +265,7 @@ class AgentLoop:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         try:
             _ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-            (_ARCHIVE_DIR / f"{ts}.jsonl").write_text("\n".join(json.dumps(m) for m in history))
+            (_ARCHIVE_DIR / f"{ts}.jsonl").write_text("\n".join(json.dumps(m) for m in history) + "\n")
         except Exception as exc:
             logger.error(f"failed to archive checkpoint: {exc}")
 
