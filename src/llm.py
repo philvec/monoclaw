@@ -67,12 +67,12 @@ class LLMClient:
                     timeout=10.0,
                 )
                 if resp.status_code != 200:
-                    logger.debug(f"embedding endpoint returned {resp.status_code}")
+                    logger.warning(f"embedding endpoint returned {resp.status_code}")
                     return None
                 data = resp.json()
                 return np.array(data["data"][0]["embedding"], dtype=np.float32)
         except Exception as exc:
-            logger.debug(f"embedding generation failed: {exc}")
+            logger.warning(f"embedding generation failed: {exc}")
             return None
 
     async def chat(

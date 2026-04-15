@@ -4,7 +4,7 @@
 
 Personal AI assistant with one continuous session, WebSocket-native multi-channel interaction, minimal codebase for clarity and security.
 
-**codebase:** `2558 lines across 13 files (src/*.py, Dockerfile, pyproject.toml)`
+**codebase:** `2619 lines across 13 files (src/*.py, Dockerfile, pyproject.toml)`
 
 ---
 
@@ -19,7 +19,7 @@ Personal AI assistant with one continuous session, WebSocket-native multi-channe
 - **WebSocket-only protocol** — monoclaw speaks one protocol. Bridges (Signal, Telegram, web UI, etc.) are separate applications that connect over WebSocket and declare their name on handshake.
 - **Intent-gated reply with reconsider** — every turn starts with an internal `will_reply: bool` decision (structured output). If true, the model's content is streamed token-by-token to the inbound channel as it's generated; each loop iteration's content is one message (chunks + end frame). If false, content stays scratchpad and a post-turn reconsideration can still deliver one final message if the agent changes its mind. Fan-out to *other* channels goes through the separate `send_message` tool. The agent can regain its own turn later via `defer_turn` (one-shot self-wakeup); recurring chores stay on the separate `schedule` tool.
 - **Structured long-term memory** — typed memories (user/project/reference/feedback) stored as individual Markdown files with SQLite FTS5 index. Hybrid keyword + vector search with temporal decay and MMR diversity re-ranking. Agent searches its own memory via tools.
-- **Automatic post-turn extraction** — after each response, the LLM extracts memorable facts and saves them with embeddings. Existing memories are updated, not duplicated.
+- **Automatic post-turn extraction** — after each response, the LLM extracts memorable facts and saves them with embeddings. Existing memories are updated, not duplicated. Extraction runs as a background task deferred until foreground is idle, so it never competes with active turns for the LLM server. Rapid bursts coalesce — only the latest task runs (covering all turns). After `_MAX_EXTRACT_CANCELS` consecutive deferrals the cap fires: extraction runs inline before releasing the turn, blocking new messages until complete, guaranteeing no context is lost.
 - **Tiered compaction** — microcompact (archive and truncate old tool results) → pre-compaction memory flush → full LLM summary. Fire-and-forget after response delivery.
 - **Container-as-deployment isolation** — security comes from container isolation, not application-level sandboxing. The agent process itself runs in Docker; tools operate under `data/workspace/` directly. Single WebSocket entrypoint — extension and security is shifted to proxies managed aside.
 - **Minimal core** — auxiliary tools (web search, web fetch, home automation, etc.) are kept out of this repo. They live in [monoclaw-tools](https://github.com/philvec/monoclaw-tools), a companion MCP server that attaches as a sidecar.

@@ -23,6 +23,7 @@ from openai.types.chat.chat_completion_message_tool_call_param import ChatComple
 from tools import ToolRegistry
 
 _MAX_TOOL_ITERATIONS = 20
+_MAX_EXTRACT_CANCELS = 8  # force extraction after this many consecutive deferrals
 _CHECKPOINT_PATH = Path("./data/history.jsonl")
 _ARCHIVE_DIR = Path("./data/archive")
 
@@ -70,6 +71,11 @@ class AgentLoop:
         self._ctx = ctx
         self._channel_manager = channel_manager
         self._session = Session()
+        self._foreground_count = 0
+        self._foreground_idle = asyncio.Event()
+        self._foreground_idle.set()
+        self._pending_extract: asyncio.Task | None = None
+        self._extract_cancel_count = 0
 
     async def startup(self) -> None:
         """Restore checkpoint and pre-warm the LLM cache."""
@@ -85,13 +91,27 @@ class AgentLoop:
 
     async def handle_message(self, msg: InboundMessage) -> None:
         logger.info(f"acquiring session lock for {msg.channel}")
-        async with self._session.lock:
-            await self._process(msg)
+        self._foreground_count += 1
+        self._foreground_idle.clear()
+        try:
+            async with self._session.lock:
+                await self._process(msg)
+        finally:
+            self._foreground_count -= 1
+            if self._foreground_count == 0:
+                self._foreground_idle.set()
 
     async def handle_cron(self, job: CronJob) -> None:
         synthetic = InboundMessage(channel=CRON_CHANNEL, text=job.message, timestamp=0)
-        async with self._session.lock:
-            await self._process(synthetic)
+        self._foreground_count += 1
+        self._foreground_idle.clear()
+        try:
+            async with self._session.lock:
+                await self._process(synthetic)
+        finally:
+            self._foreground_count -= 1
+            if self._foreground_count == 0:
+                self._foreground_idle.set()
 
     async def _process(self, msg: InboundMessage) -> None:
         """Run one full agent turn: LLM call, tool loop, checkpoint, memory extraction."""
@@ -249,7 +269,33 @@ class AgentLoop:
 
         # Fire-and-forget: compact history and extract memories
         asyncio.create_task(self._compact_session(), name="compact")
-        asyncio.create_task(self._run_extract_memories(self._session.history), name="extract")
+
+        # Coalesce extraction tasks. On cap hit, bypass the task system entirely and
+        # await extraction directly — session lock is still held, so all new turns queue
+        # behind us until it completes. No cancellation possible.
+        if self._pending_extract and not self._pending_extract.done():
+            self._extract_cancel_count += 1
+            self._pending_extract.cancel()
+            self._pending_extract = None
+            if self._extract_cancel_count >= _MAX_EXTRACT_CANCELS:
+                logger.info(
+                    f"extract cap reached after {self._extract_cancel_count} deferrals, "
+                    "blocking turn release until extraction completes"
+                )
+                self._extract_cancel_count = 0
+                await self._run_extract_memories(self._session.history, force=True)
+            else:
+                logger.info(f"extract deferred (deferral #{self._extract_cancel_count}), new turn took priority")
+                self._pending_extract = asyncio.create_task(
+                    self._run_extract_memories(self._session.history),
+                    name="extract",
+                )
+        else:
+            self._extract_cancel_count = 0
+            self._pending_extract = asyncio.create_task(
+                self._run_extract_memories(self._session.history),
+                name="extract",
+            )
 
     # Intent / reconsider helpers
 
@@ -314,6 +360,13 @@ class AgentLoop:
         if not self._ctx.should_compact():
             return
         async with self._session.lock:
+            # Cancel inside the lock so no new turn can slip in and create a replacement
+            # extract task between the cancellation and the start of flush_memories.
+            if self._pending_extract and not self._pending_extract.done():
+                self._pending_extract.cancel()
+                self._pending_extract = None
+                self._extract_cancel_count = 0
+                logger.info("extract task cancelled: compaction flush covers it")
             self._archive_checkpoint(self._session.history)
             self._session.history = await self._ctx.compact(
                 self._session.history,
@@ -351,7 +404,16 @@ class AgentLoop:
         except Exception as exc:
             logger.error(f"failed to archive checkpoint: {exc}")
 
-    async def _run_extract_memories(self, history: list[ChatCompletionMessageParam]) -> None:
+    async def _run_extract_memories(self, history: list[ChatCompletionMessageParam], *, force: bool = False) -> None:
+        if not force:
+            try:
+                await self._foreground_idle.wait()
+            except asyncio.CancelledError:
+                logger.info("extract task cancelled while waiting for foreground idle")
+                raise
+            logger.info("extract triggered: foreground idle")
+        else:
+            logger.info("extract triggered: forced inline (cap reached)")
         try:
             ops = await self._memory.extract_memories(history)
             if ops:

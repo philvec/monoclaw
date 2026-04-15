@@ -149,7 +149,7 @@ class CronService:
             for raw in data.get("jobs", []):
                 job = CronJob.model_validate(raw)
                 self._jobs[job.id] = job
-            logger.debug(f"loaded {len(self._jobs)} cron jobs")
+            logger.info(f"loaded {len(self._jobs)} cron jobs")
         except Exception as exc:
             logger.warning(f"failed to load cron storage: {exc}")
 
