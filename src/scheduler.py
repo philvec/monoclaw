@@ -60,6 +60,13 @@ class CronService:
         return job
 
     def remove_job(self, job_id: str) -> None:
+        # Accept full UUID or any unambiguous prefix — historical list output only showed id[:8].
+        if job_id not in self._jobs:
+            matches = [jid for jid in self._jobs if jid.startswith(job_id)]
+            if len(matches) == 1:
+                job_id = matches[0]
+            elif len(matches) > 1:
+                raise ValueError(f"job id prefix {job_id!r} is ambiguous ({len(matches)} matches)")
         if not (job := self._jobs.pop(job_id, None)):
             raise ValueError(f"job {job_id!r} not found")
         self._save()
@@ -89,12 +96,11 @@ class CronService:
             await asyncio.sleep(_TICK_INTERVAL)
 
     async def _fire(self, job: CronJob, on_trigger: Callable[[CronJob], Awaitable[None]]) -> None:
+        # Advance next_run (or pop) BEFORE awaiting the trigger. on_trigger can hold the session
+        # lock for tens of seconds; if next_run stays in the past during that time, the tick loop
+        # keeps enqueuing duplicate _fire tasks and floods the agent with backlogged turns once
+        # the lock releases.
         job.last_run = _now_ms()
-        try:
-            await on_trigger(job)
-        except Exception:
-            logger.exception(f"cron job {job.id[:8]} raised")
-
         if job.delete_after_run or job.schedule.type == "at":
             self._jobs.pop(job.id, None)
         else:
@@ -104,6 +110,11 @@ class CronService:
                 logger.error(f"cron job {job.id[:8]} has invalid schedule; removing")
                 self._jobs.pop(job.id, None)
         self._save()
+
+        try:
+            await on_trigger(job)
+        except Exception:
+            logger.exception(f"cron job {job.id[:8]} raised")
 
     def _compute_next_run(self, job: CronJob) -> int:
         now = _now_ms()

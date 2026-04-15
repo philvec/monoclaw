@@ -89,8 +89,9 @@ class ToolRegistry:
             GrepTool(cfg),
             ShellTool(cfg),
             ScheduleTool(cfg, cron),
-            SetOutputChannelTool(cfg, channel_manager),
-            ListOutputChannelsTool(cfg, channel_manager),
+            SendMessageTool(cfg, channel_manager),
+            ListChannelsTool(cfg, channel_manager),
+            DeferTurnTool(cfg, cron),
             MemorySearchTool(cfg, memory_store, llm),
             MemoryReadTool(cfg, memory_store),
             MasterMemoryTool(cfg, memory_store),
@@ -339,7 +340,7 @@ class ScheduleTool(Tool["ScheduleTool.Params"]):
             jobs = self._cron.list_jobs()
             if not jobs:
                 return "no scheduled jobs"
-            lines = [f"{j.id[:8]} | {j.name or '(unnamed)'} | {j.schedule.type} | next: {j.next_run}" for j in jobs]
+            lines = [f"{j.id} | {j.name or '(unnamed)'} | {j.schedule.type} | next: {j.next_run}" for j in jobs]
             return "\n".join(lines)
 
         if params.action == "remove":
@@ -375,26 +376,79 @@ class ScheduleTool(Tool["ScheduleTool.Params"]):
         return f"unknown action: {params.action!r}"
 
 
-class SetOutputChannelTool(Tool["SetOutputChannelTool.Params"]):
-    """Set the output channel for this response. Call before producing output."""
+class DeferTurnTool(Tool["DeferTurnTool.Params"]):
+    """Schedule a future turn so YOU regain initiative without waiting for a user message. \
+Use this after sending a message when you want to follow up later, check on something, or \
+continue a thread after a delay (e.g. you reminded the wife to take meds — defer 30 min and \
+report back to the user). The `note` becomes the user message that fires the turn. \
+For recurring chores (daily reports, periodic checks), use `schedule` instead — this is for \
+one-shot self-wakeups that complete a workflow."""
+
+    def __init__(self, cfg: Config, cron: CronService) -> None:
+        super().__init__(cfg)
+        self._cron = cron
+
+    class Params(BaseModel):
+        note: str = Field(
+            description="Reminder text injected as the user message when the turn fires "
+            "(e.g. 'follow up: did wife confirm she took meds?')"
+        )
+        delay_seconds: int | None = Field(
+            default=None, description="Wake up after this many seconds from now (alternative to at_iso)"
+        )
+        at_iso: str | None = Field(
+            default=None, description="ISO 8601 datetime to wake up at, e.g. '2026-04-14T18:30:00+02:00'"
+        )
+
+    async def execute(self, params: Params) -> str:  # type: ignore[override]
+        if params.delay_seconds is None and not params.at_iso:
+            return "error: provide delay_seconds or at_iso"
+        if params.at_iso:
+            dt = datetime.fromisoformat(params.at_iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            at_ms = int(dt.timestamp() * 1000)
+        else:
+            at_ms = int(datetime.now(timezone.utc).timestamp() * 1000) + (params.delay_seconds or 0) * 1000
+        try:
+            job = self._cron.add_job(
+                schedule=CronSchedule(type="at", at=at_ms),
+                message=params.note,
+                name="defer_turn",
+            )
+        except ValueError as exc:
+            return f"error: {exc}"
+        return f"deferred turn scheduled (job {job.id[:8]})"
+
+
+class SendMessageTool(Tool["SendMessageTool.Params"]):
+    """Send a complete message to a named channel — FAN-OUT ONLY. Use this to notify someone \
+on a DIFFERENT channel from the inbound one (e.g. cc the wife while replying to a friend). \
+You do NOT need this tool to reply to the sender of the current turn — that reply is produced \
+simply by writing it as your assistant content, and the runtime auto-delivers it to the INPUT \
+CHANNEL. This tool is for reaching *other* recipients in the same turn."""
 
     def __init__(self, cfg: Config, channel_manager: WebSocketChannelManager) -> None:
         super().__init__(cfg)
         self._channel_manager = channel_manager
 
     class Params(BaseModel):
-        channel: str = Field(description="Channel name to route the response to")
+        channel: str = Field(
+            description="Target channel name (must be currently connected). Should differ from INPUT CHANNEL."
+        )
+        text: str = Field(description="Exact message text the recipient will see")
 
     async def execute(self, params: Params) -> str:  # type: ignore[override]
         try:
-            self._channel_manager.set_output(params.channel)
-            return f"output set to {params.channel}"
-        except (KeyError, ValueError) as exc:
+            await self._channel_manager.send_full_msg(params.channel, params.text)
+        except Exception as exc:
             return f"error: {exc}"
+        return f"sent to {params.channel}"
 
 
-class ListOutputChannelsTool(Tool["ListOutputChannelsTool.Params"]):
-    """List available output channels."""
+class ListChannelsTool(Tool["ListChannelsTool.Params"]):
+    """List currently connected channels you can target with `send_message` for fan-out. \
+Use before fanning out if you're not sure who's reachable."""
 
     def __init__(self, cfg: Config, channel_manager: WebSocketChannelManager) -> None:
         super().__init__(cfg)
@@ -406,7 +460,7 @@ class ListOutputChannelsTool(Tool["ListOutputChannelsTool.Params"]):
     async def execute(self, params: Params) -> str:  # type: ignore[override]
         names = self._channel_manager.active_channels
         if not names:
-            return "no output channels available"
+            return "no channels connected"
         return "\n".join(names)
 
 

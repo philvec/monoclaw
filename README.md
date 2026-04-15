@@ -4,7 +4,7 @@
 
 Personal AI assistant with one continuous session, WebSocket-native multi-channel interaction, minimal codebase for clarity and security.
 
-**codebase:** `2350 lines across 13 files (src/*.py, Dockerfile, pyproject.toml)`
+**codebase:** `2558 lines across 13 files (src/*.py, Dockerfile, pyproject.toml)`
 
 ---
 
@@ -17,7 +17,7 @@ Personal AI assistant with one continuous session, WebSocket-native multi-channe
 
 - **Single continuous session** — one history shared across all channels and time. The agent is coherent and persistent like a human, not stateless.
 - **WebSocket-only protocol** — monoclaw speaks one protocol. Bridges (Signal, Telegram, web UI, etc.) are separate applications that connect over WebSocket and declare their name on handshake.
-- **Agent-selectable output channel** — the agent can inspect active channels and redirect its reply mid-turn using tools. Default: reply to the inbound channel.
+- **Intent-gated reply with reconsider** — every turn starts with an internal `will_reply: bool` decision (structured output). If true, the model's content is streamed token-by-token to the inbound channel as it's generated; each loop iteration's content is one message (chunks + end frame). If false, content stays scratchpad and a post-turn reconsideration can still deliver one final message if the agent changes its mind. Fan-out to *other* channels goes through the separate `send_message` tool. The agent can regain its own turn later via `defer_turn` (one-shot self-wakeup); recurring chores stay on the separate `schedule` tool.
 - **Structured long-term memory** — typed memories (user/project/reference/feedback) stored as individual Markdown files with SQLite FTS5 index. Hybrid keyword + vector search with temporal decay and MMR diversity re-ranking. Agent searches its own memory via tools.
 - **Automatic post-turn extraction** — after each response, the LLM extracts memorable facts and saves them with embeddings. Existing memories are updated, not duplicated.
 - **Tiered compaction** — microcompact (archive and truncate old tool results) → pre-compaction memory flush → full LLM summary. Fire-and-forget after response delivery.
@@ -40,14 +40,16 @@ A bridge connects to monoclaw via WebSocket on port `8765`.
 {"text": "Hello!"}
 ```
 
-**Outbound chunk** (monoclaw → bridge, during generation):
+**Outbound message** (monoclaw → bridge) — a reply arrives as one or more `chunk` frames (streamed token-by-token during auto-delivery, or a single chunk for fan-out / reconsider) terminated by an `end` frame. A single turn may produce multiple such messages (e.g. mid-turn narration before a tool call, then a final answer):
 ```json
-{"chunk": "Hello"}
+{"chunk": "He"}
+{"chunk": "llo"}
+{"end": true}
 ```
 
-**End of message**:
+When the agent has decided it will reply (but may still need to run tools before generating content), it sends one empty chunk right away — bridges can treat any inbound chunk as "typing started":
 ```json
-{"end": true}
+{"chunk": ""}
 ```
 
 **Error** (monoclaw → bridge, e.g. bad handshake):

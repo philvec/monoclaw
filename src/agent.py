@@ -2,13 +2,12 @@ import asyncio
 import json
 from datetime import datetime, timezone
 
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from context import ContextManager
-from llm import LLMClient, LLMResponse
+from llm import LLMClient
 from memory import MemoryManager
 from scheduler import CronJob
 from channels import WebSocketChannelManager, InboundMessage
@@ -26,6 +25,27 @@ from tools import ToolRegistry
 _MAX_TOOL_ITERATIONS = 20
 _CHECKPOINT_PATH = Path("./data/history.jsonl")
 _ARCHIVE_DIR = Path("./data/archive")
+
+_INTENT_PROMPT = (
+    "DECISION POINT (internal, not delivered to anyone). Based on the current inbound message, "
+    "the conversation history, and the channel rules in your system prompt, decide: do you want "
+    "to reply to the user on INPUT CHANNEL this turn? If yes, whatever you write as assistant "
+    "content during the turn will be auto-delivered. If no, your content stays scratchpad. "
+    "Return JSON per the schema. Keep `reason` short."
+)
+
+
+class TurnIntent(BaseModel):
+    will_reply: bool = Field(
+        description="True if this turn should produce a reply (auto-delivered content); False to stay silent"
+    )
+    reason: str = Field(default="", description="One short sentence (optional)")
+
+
+class ReconsideredReply(BaseModel):
+    reply_now: bool = Field(description="True if you want to send a message now; False to stay silent")
+    text: str = Field(default="", description="Exact delivery text if reply_now=True; empty otherwise")
+    reason: str = Field(default="", description="One short sentence explaining the decision")
 
 
 class Session(BaseModel):
@@ -98,11 +118,9 @@ class AgentLoop:
         messages.extend(self._session.history)
 
         # Inject channel context as a user note (system role not allowed mid-conversation)
-        expected_output = self._channel_manager.resolve_output(msg.channel)
         now = datetime.now(timezone.utc).astimezone()
         ctx_lines = [
             f"INPUT CHANNEL: {msg.channel}",
-            f"CURRENTLY_SET_OUTPUT_CHANNEL: {expected_output}",
             f"CURRENT DATETIME: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         ]
         messages.append(ChatCompletionUserMessageParam(role="user", content="\n".join(ctx_lines)))
@@ -113,29 +131,54 @@ class AgentLoop:
         self._session.history.append(user_msg)
         self._append_to_checkpoint(user_msg)
 
-        # Tool execution loop
-        response: LLMResponse | None = None
-        iterations = 0
-        on_delta_fn: Callable[[str], Awaitable[None]] | None = None
+        # Intent decision: ask the model up-front whether this turn should produce a reply.
+        # Cron turns skip this — they don't have a single inbound human to reply to.
+        if msg.channel == CRON_CHANNEL:
+            will_reply = False
+            logger.info("turn from cron: will_reply=False")
+        else:
+            intent = await self._decide_intent(messages)
+            will_reply = intent.will_reply
+            logger.info(f"turn from {msg.channel!r}: will_reply={will_reply} ({intent.reason!r})")
 
-        async def _on_delta(content: str) -> None:
-            nonlocal on_delta_fn
-            if on_delta_fn is None:
-                output = self._channel_manager.resolve_output(msg.channel)
-                if output is not None:
-                    on_delta_fn = self._channel_manager.make_on_delta(output)
-            if on_delta_fn is not None:
-                try:
-                    await on_delta_fn(content)
-                except Exception as exc:
-                    logger.error(f"streaming delta failed: {exc}")
+        # As soon as we know a reply is coming, send an empty chunk so the bridge knows
+        # something is on the way and can render a typing indicator during tool iterations.
+        if will_reply and msg.channel != CRON_CHANNEL:
+            try:
+                await self._channel_manager.send_chunk(msg.channel, "")
+            except Exception as exc:
+                logger.warning(f"typing-chunk to {msg.channel!r} skipped: {exc}")
+
+        # Tool execution loop
+        iterations = 0
 
         while iterations < _MAX_TOOL_ITERATIONS:
             iterations += 1
 
+            # Wire streaming auto-delivery when the model has committed to reply: each content
+            # token goes to the inbound channel as it arrives, and an `end` frame closes the
+            # message after the LLM call returns (if we streamed anything).
+            streamed = False
+
+            async def stream_delta(text: str) -> None:
+                nonlocal streamed
+                try:
+                    await self._channel_manager.send_chunk(msg.channel, text)
+                    streamed = True
+                except Exception as exc:
+                    logger.warning(f"auto-delivery chunk to {msg.channel!r} skipped: {exc}")
+
+            on_delta = stream_delta if (will_reply and msg.channel != CRON_CHANNEL) else None
+
             logger.info(f"llm call start (iter={iterations}, msgs={len(messages)})")
-            response = await self._llm.chat(messages, tools=self._tool_registry.definitions, on_delta=_on_delta)
+            response = await self._llm.chat(messages, tools=self._tool_registry.definitions, on_delta=on_delta)
             self._ctx.update(response)
+
+            if streamed:
+                try:
+                    await self._channel_manager.end_msg(msg.channel)
+                except Exception as exc:
+                    logger.warning(f"auto-delivery end-frame to {msg.channel!r} skipped: {exc}")
 
             if response.finish_reason == "error":
                 logger.error(err := f"LLM error: {response.error or 'unknown'}")
@@ -147,8 +190,9 @@ class AgentLoop:
                 break
 
             # Append assistant message
-            tool_call_list: list[ChatCompletionMessageToolCallParam] = []
+            assistant_msg = ChatCompletionAssistantMessageParam(role="assistant", content=response.content or "")
             if response.tool_calls:
+                tool_call_list: list[ChatCompletionMessageToolCallParam] = []
                 for tc in response.tool_calls:
                     try:
                         args_json = json.dumps(tc.arguments)
@@ -160,19 +204,24 @@ class AgentLoop:
                             id=tc.id, type="function", function={"name": tc.name, "arguments": args_json}
                         )
                     )
-            if tool_call_list:
-                assistant_msg: ChatCompletionMessageParam = ChatCompletionAssistantMessageParam(
-                    role="assistant", content=response.content or "", tool_calls=tool_call_list
-                )
-            else:
-                assistant_msg = ChatCompletionAssistantMessageParam(role="assistant", content=response.content or "")
+                assistant_msg["tool_calls"] = tool_call_list
             messages.append(assistant_msg)
 
             if response.finish_reason != "tool_calls" or not response.tool_calls:
                 break
 
             if iterations == _MAX_TOOL_ITERATIONS:
+                # Synthesize error responses so the assistant's tool_calls are not orphaned
+                # (the chat API rejects history containing tool_calls without paired tool results).
                 logger.warning(f"tool iteration limit ({_MAX_TOOL_ITERATIONS}) reached — skipping final tool calls")
+                for tc in response.tool_calls:
+                    messages.append(
+                        ChatCompletionToolMessageParam(
+                            role="tool",
+                            tool_call_id=tc.id,
+                            content=f"error: tool iteration limit ({_MAX_TOOL_ITERATIONS}) reached — not executed",
+                        )
+                    )
                 break
 
             # Execute all requested tools
@@ -181,15 +230,18 @@ class AgentLoop:
                 result = await self._tool_registry.execute(tc.name, tc.arguments)
                 messages.append(ChatCompletionToolMessageParam(role="tool", tool_call_id=tc.id, content=result))
 
-        # Deliver response via output channel
-        output = self._channel_manager.resolve_output(msg.channel)
-        if output is not None and response is not None:
-            logger.info(f"using output: channel: {output}")
-            try:
-                await self._channel_manager.end_message(output)
-            except Exception as exc:
-                logger.error(f"failed to deliver end signal: {exc}")
-        self._channel_manager.reset_output()
+        # Post-turn reconsideration on silent turns — give the model one last chance to change
+        # its mind. (Auto-delivery only fires when will_reply=True, so reaching here with
+        # will_reply=False means nothing has gone out to the inbound channel.)
+        if not will_reply and msg.channel != CRON_CHANNEL:
+            reconsider = await self._reconsider_silence(messages, msg.channel)
+            logger.info(f"reconsider on {msg.channel!r}: reply_now={reconsider.reply_now} ({reconsider.reason!r})")
+            if reconsider.reply_now and reconsider.text.strip():
+                try:
+                    await self._channel_manager.send_full_msg(msg.channel, reconsider.text)
+                    messages.append(ChatCompletionAssistantMessageParam(role="assistant", content=reconsider.text))
+                except Exception as exc:
+                    logger.warning(f"reconsider delivery to {msg.channel!r} skipped: {exc}")
 
         # Persist turn to session history (drop only the base system prompt; rebuilt fresh each turn)
         self._session.history = messages[1:]
@@ -198,6 +250,36 @@ class AgentLoop:
         # Fire-and-forget: compact history and extract memories
         asyncio.create_task(self._compact_session(), name="compact")
         asyncio.create_task(self._run_extract_memories(self._session.history), name="extract")
+
+    # Intent / reconsider helpers
+
+    async def _decide_intent(self, messages: list[ChatCompletionMessageParam]) -> TurnIntent:
+        decision_msgs: list[ChatCompletionMessageParam] = [
+            *messages,
+            ChatCompletionUserMessageParam(role="user", content=_INTENT_PROMPT),
+        ]
+        resp = await self._llm.chat(decision_msgs, response_model=TurnIntent)
+        if isinstance(resp.parsed, TurnIntent):
+            return resp.parsed
+        logger.warning(f"intent decision parse failed (finish={resp.finish_reason}); defaulting will_reply=True")
+        return TurnIntent(will_reply=True, reason="parse-fail default")
+
+    async def _reconsider_silence(self, messages: list[ChatCompletionMessageParam], channel: str) -> ReconsideredReply:
+        prompt = (
+            "RECONSIDERATION (internal). You initially chose to stay silent this turn. After any "
+            f"internal processing, decide now: do you want to send a message on channel '{channel}' "
+            "after all? If yes, provide the exact text the user will see (follow your brevity rules "
+            "— minimal words). If no, confirm silence. Return JSON per the schema."
+        )
+        decision_msgs: list[ChatCompletionMessageParam] = [
+            *messages,
+            ChatCompletionUserMessageParam(role="user", content=prompt),
+        ]
+        resp = await self._llm.chat(decision_msgs, response_model=ReconsideredReply)
+        if isinstance(resp.parsed, ReconsideredReply):
+            return resp.parsed
+        logger.warning(f"reconsider parse failed (finish={resp.finish_reason}); staying silent")
+        return ReconsideredReply(reply_now=False, text="")
 
     # Checkpoint
 

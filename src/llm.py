@@ -79,9 +79,9 @@ class LLMClient:
         self,
         messages: list[ChatCompletionMessageParam],
         tools: list[dict] | None = None,
-        on_delta: Callable[[str], Awaitable[None]] | None = None,
         response_model: type[BaseModel] | None = None,
         max_tokens: int | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {
             "model": "local",  # llama.cpp ignores this field
@@ -106,9 +106,10 @@ class LLMClient:
             stream = await self._client.chat.completions.create(**kwargs)
             async for chunk in stream:
                 chunks.append(chunk)
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if delta and delta.content and on_delta:
-                    await on_delta(delta.content)
+                if on_delta is not None:
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    if delta and delta.content:
+                        await on_delta(delta.content)
         except Exception as exc:
             return LLMResponse(content="", finish_reason="error", error=str(exc))
 

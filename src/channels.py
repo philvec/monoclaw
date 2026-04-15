@@ -24,12 +24,11 @@ class WebSocketChannelManager:
     Protocol:
       - Client connects and sends a handshake with its name: {"name": "signal/bob"}
       - Client sends messages: {"text": "..."}
-      - Server sends replies: {"text": "..."} or {"type": "typing"}
+      - Server sends replies as two frames: {"chunk": "..."} then {"end": true}
     """
 
     def __init__(self) -> None:
         self._connections: dict[str, Any] = {}
-        self._pending: str | None = None  # for explicit output channel override
         self._on_message: Callable[[InboundMessage], Awaitable[None]] | None = None
 
     # Lifecycle
@@ -40,45 +39,30 @@ class WebSocketChannelManager:
         async with websockets.serve(self._handle, WS_HOST, WS_PORT):
             await asyncio.Future()
 
-    # Output routing
-
-    def resolve_output(self, input_channel: str) -> str | None:
-        """Return output channel name: explicit pending → same as inbound."""
-        if self._pending is not None:
-            return self._pending
-        if input_channel in self._connections:
-            return input_channel
-        return None
-
-    def set_output(self, channel_name: str) -> None:
-        if channel_name not in self._connections:
-            raise ValueError(f"{channel_name!r} is not connected")
-        self._pending = channel_name
-
-    def reset_output(self) -> None:
-        self._pending = None
-
     @property
     def active_channels(self) -> list[str]:
         return list(self._connections.keys())
 
-    # Sending
+    # Sending — all methods raise if the channel isn't connected or the send fails.
 
-    async def end_message(self, channel_name: str) -> None:
-        """Signal end of streamed message. Content is delivered via on_delta chunks."""
+    async def send_chunk(self, channel_name: str, text: str) -> None:
+        """Send a single chunk to a channel (no end frame). Use for streaming."""
+        ws = self._connections.get(channel_name)
+        if ws is None:
+            raise RuntimeError(f"channel {channel_name!r} is not connected")
+        await ws.send(json.dumps({"chunk": text}))
+
+    async def end_msg(self, channel_name: str) -> None:
+        """Signal end-of-message to a channel."""
         ws = self._connections.get(channel_name)
         if ws is None:
             raise RuntimeError(f"channel {channel_name!r} is not connected")
         await ws.send(json.dumps({"end": True}))
 
-    def make_on_delta(self, channel_name: str) -> Callable[[str], Awaitable[None]]:
-        async def on_delta(content: str) -> None:
-            ws = self._connections.get(channel_name)
-            if ws is None:
-                raise RuntimeError(f"channel {channel_name!r} disconnected during streaming")
-            await ws.send(json.dumps({"chunk": content}))
-
-        return on_delta
+    async def send_full_msg(self, channel_name: str, text: str) -> None:
+        """Atomic chunk + end convenience — single complete message."""
+        await self.send_chunk(channel_name, text)
+        await self.end_msg(channel_name)
 
     # WebSocket handler
 
@@ -124,6 +108,4 @@ class WebSocketChannelManager:
                 asyncio.ensure_future(self._on_message(msg))
         finally:
             self._connections.pop(name, None)
-            if self._pending == name:
-                self._pending = None
             logger.info(f"channel disconnected: {name!r}")
