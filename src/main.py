@@ -85,7 +85,6 @@ async def main() -> None:
 
     logger.info("monoclaw starting")
     await channel_manager.start(on_message)
-    await asyncio.Event().wait()  # block until shutdown signal
 
 
 async def _cleanup(cron: CronService, mcp: MCPClient) -> None:

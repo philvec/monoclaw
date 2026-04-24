@@ -4,7 +4,7 @@
 
 Personal AI assistant with one continuous session, WebSocket-native multi-channel interaction, minimal codebase for clarity and security.
 
-**codebase:** `2619 lines across 13 files (src/*.py, Dockerfile, pyproject.toml)`
+**codebase:** `2774 lines across 15 files (src/*.py, Dockerfile, pyproject.toml)`
 
 ---
 
@@ -17,7 +17,7 @@ Personal AI assistant with one continuous session, WebSocket-native multi-channe
 
 - **Single continuous session** — one history shared across all channels and time. The agent is coherent and persistent like a human, not stateless.
 - **WebSocket-only protocol** — monoclaw speaks one protocol. Bridges (Signal, Telegram, web UI, etc.) are separate applications that connect over WebSocket and declare their name on handshake.
-- **Intent-gated reply with reconsider** — every turn starts with an internal `will_reply: bool` decision (structured output). If true, the model's content is streamed token-by-token to the inbound channel as it's generated; each loop iteration's content is one message (chunks + end frame). If false, content stays scratchpad and a post-turn reconsideration can still deliver one final message if the agent changes its mind. Fan-out to *other* channels goes through the separate `send_message` tool. The agent can regain its own turn later via `defer_turn` (one-shot self-wakeup); recurring chores stay on the separate `schedule` tool.
+- **Structured reply with per-turn review** — every LLM call produces a structured `Answer(justification, message, stay_silent)`. When `stay_silent=False`, `message` is auto-delivered to the inbound channel; `stay_silent=True` keeps content as scratchpad only. A second LLM pass (the *reviewer*) checks every answer: the `justification` must cite a specific, verifiable source (exact tool result, named memory entry, quoted past message, or channel rule), and that source must genuinely support both the decision and the content. On failure the agent retries up to `MAX_NEGATIVE_REVIEWS` times; if still rejected the reply is suppressed and the full trail is archived. Fan-out to *other* channels goes through the separate `send_message` tool. The agent can regain its own turn later via `defer_turn` (one-shot self-wakeup); recurring chores stay on the separate `schedule` tool.
 - **Structured long-term memory** — typed memories (user/project/reference/feedback) stored as individual Markdown files with SQLite FTS5 index. Hybrid keyword + vector search with temporal decay and MMR diversity re-ranking. Agent searches its own memory via tools.
 - **Automatic post-turn extraction** — after each response, the LLM extracts memorable facts and saves them with embeddings. Existing memories are updated, not duplicated. Extraction runs as a background task deferred until foreground is idle, so it never competes with active turns for the LLM server. Rapid bursts coalesce — only the latest task runs (covering all turns). After `_MAX_EXTRACT_CANCELS` consecutive deferrals the cap fires: extraction runs inline before releasing the turn, blocking new messages until complete, guaranteeing no context is lost.
 - **Tiered compaction** — microcompact (archive and truncate old tool results) → pre-compaction memory flush → full LLM summary. Fire-and-forget after response delivery.
@@ -40,14 +40,14 @@ A bridge connects to monoclaw via WebSocket on port `8765`.
 {"text": "Hello!"}
 ```
 
-**Outbound message** (monoclaw → bridge) — a reply arrives as one or more `chunk` frames (streamed token-by-token during auto-delivery, or a single chunk for fan-out / reconsider) terminated by an `end` frame. A single turn may produce multiple such messages (e.g. mid-turn narration before a tool call, then a final answer):
+**Outbound message** (monoclaw → bridge) — a reply arrives as one or more `chunk` frames (streamed token-by-token during auto-delivery, or a single chunk for fan-out) terminated by an `end` frame. A single turn may produce multiple such messages (e.g. mid-turn narration before a tool call, then a final answer):
 ```json
 {"chunk": "He"}
 {"chunk": "llo"}
 {"end": true}
 ```
 
-When the agent has decided it will reply (but may still need to run tools before generating content), it sends one empty chunk right away — bridges can treat any inbound chunk as "typing started":
+When the agent is about to reply (`stay_silent=False`, but may still need to run tools before generating content), it sends one empty chunk right away — bridges can treat any inbound chunk as "typing started":
 ```json
 {"chunk": ""}
 ```

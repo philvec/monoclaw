@@ -39,10 +39,14 @@ class LLMResponse(BaseModel):
 class LLMClient:
     def __init__(self, cfg: LLMConfig) -> None:
         self._cfg = cfg
+        self._schema_tools: list[dict] = []
         self._client = AsyncOpenAI(
             base_url=cfg.base_url,
             api_key="sk-local",  # required by AsyncOpenAI; llama.cpp ignores it
         )
+
+    def set_schema_tools(self, tools: list[dict]) -> None:
+        self._schema_tools = tools
 
     async def fetch_context_window(self) -> int:
         """Fetch the context window size, retrying until the model is ready."""
@@ -100,6 +104,9 @@ class LLMClient:
                 "type": "json_schema",
                 "json_schema": {"name": response_model.__name__, "schema": schema},
             }
+            if not tools and self._schema_tools:
+                kwargs["tools"] = self._schema_tools
+                kwargs["tool_choice"] = "auto"
 
         chunks: list[Any] = []
         try:

@@ -1,7 +1,7 @@
 import asyncio
 import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 
 from typing import Any
 
@@ -29,11 +29,11 @@ class WebSocketChannelManager:
 
     def __init__(self) -> None:
         self._connections: dict[str, Any] = {}
-        self._on_message: Callable[[InboundMessage], Awaitable[None]] | None = None
+        self._on_message: Callable[[InboundMessage], Coroutine[Any, Any, None]]
 
     # Lifecycle
 
-    async def start(self, on_message: Callable[[InboundMessage], Awaitable[None]]) -> None:
+    async def start(self, on_message: Callable[[InboundMessage], Coroutine[Any, Any, None]]) -> None:
         self._on_message = on_message
         logger.info(f"websocket server listening on {WS_HOST}:{WS_PORT}")
         async with websockets.serve(self._handle, WS_HOST, WS_PORT):
@@ -98,14 +98,12 @@ class WebSocketChannelManager:
                     await ws.send(json.dumps({"error": f"invalid JSON: {exc}"}))
                     continue
                 text: str = data.get("text", "")
-                if self._on_message is None:
-                    raise RuntimeError("on_message handler is not set")
                 msg = InboundMessage(
                     channel=name,
                     text=text.strip(),
                     timestamp=int(time.time() * 1000),
                 )
-                asyncio.ensure_future(self._on_message(msg))
+                asyncio.create_task(self._on_message(msg))
         finally:
             self._connections.pop(name, None)
             logger.info(f"channel disconnected: {name!r}")

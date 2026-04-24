@@ -147,7 +147,7 @@ class MemoryStore:
         self._write_md_file(entry)
         blob = _pack_embedding(embedding) if embedding is not None else None
         self._db.execute(
-            "INSERT INTO memories (slug, type, content, created, updated, embedding) " "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO memories (slug, type, content, created, updated, embedding) VALUES (?, ?, ?, ?, ?, ?)",
             (entry.slug, entry.type, entry.content, entry.created.isoformat(), entry.updated.isoformat(), blob),
         )
         self._db.commit()
@@ -404,7 +404,7 @@ class MemoryStore:
                 for e in group:
                     date = e.updated.strftime("%Y-%m-%d")
                     lines.append(f"- **{e.slug}** (updated {date})")
-        logger.info(f"generated memory index: {', '.join(e.slug for e in entries)}")
+        logger.info(f"generated memory index: {len(entries)} entries.")
         return f"{_MEMORY_MD_HEADER.rstrip()}" + "\n".join(lines) + "\n"
 
     def write_index_file(self) -> None:
@@ -416,13 +416,13 @@ class MemoryStore:
         self._db.commit()
 
         for md_file in self._base.glob("*.md"):
-            if md_file.name == "MEMORY.md":
+            if md_file.name in ("MEMORY.md", "MASTER.md"):
                 continue
             try:
                 entry = self._parse_md_file(md_file)
                 if entry:
                     self._db.execute(
-                        "INSERT INTO memories (slug, type, content, created, updated) " "VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO memories (slug, type, content, created, updated) VALUES (?, ?, ?, ?, ?)",
                         (entry.slug, entry.type, entry.content, entry.created.isoformat(), entry.updated.isoformat()),
                     )
             except Exception as exc:

@@ -138,7 +138,9 @@ def _safe_path(rel: str) -> Path:
     """Resolve rel relative to _WORKSPACE; raise ValueError if it escapes."""
     base = _WORKSPACE.resolve()
     target = (base / rel).resolve()
-    if not str(target).startswith(str(base)):
+    try:
+        target.relative_to(base)
+    except ValueError:
         raise ValueError(f"path {rel!r} escapes workspace")
     return target
 

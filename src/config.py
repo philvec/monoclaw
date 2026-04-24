@@ -18,6 +18,8 @@ SYSERR = "SYSTEM ERROR:"
 CRON_CHANNEL = "cron"
 WS_HOST = "0.0.0.0"
 WS_PORT = 8765
+MAX_STORED_MSG_CHARS = 8000
+ARCHIVE_DIR = Path("./data/archive")
 
 
 class LLMConfig(BaseModel):

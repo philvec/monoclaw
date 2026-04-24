@@ -84,9 +84,14 @@ class MCPClient:
 
                 self._exit_stacks.append(stack)
                 logger.info(f"MCP server {cfg.name!r}: connected, {registered} tools")
-            except Exception as exc:
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
                 logger.error(f"MCP server {cfg.name!r}: failed to connect: {exc}")
-                await stack.aclose()
+                try:
+                    await stack.aclose()
+                except BaseException:
+                    pass
 
     async def stop(self) -> None:
         for stack in reversed(self._exit_stacks):
