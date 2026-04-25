@@ -8,11 +8,11 @@ from openai.types.chat import (
     ChatCompletionUserMessageParam,
 )
 
-from config import ARCHIVE_DIR, MAX_STORED_MSG_CHARS, logger
+from config import ARCHIVE_DIR, logger
 from llm import LLMClient
-from models import Answer, Review
+from models import Review
 
-MAX_NEGATIVE_REVIEWS = 3
+MAX_NEGATIVE_REVIEWS = 4
 
 _REVIEW_PROMPT = (
     "REVIEW (internal, not delivered). Evaluate the preceding assistant message: "
@@ -21,8 +21,13 @@ _REVIEW_PROMPT = (
     "(e.g. the specific channel rule from the system prompt, or the exact user message saying not to reply). "
     "A vague or implicit reason for silence is not acceptable — mark is_correct=False. "
     "(2) Does the justification cite a specific, named source — exact tool result, memory entry, "
-    "quoted past message, or named channel rule — that verifiably supports EVERY claim in the message "
-    "and the reply decision? "
+    "quoted past message, named channel rule, or system prompt / MASTER.md content — that verifiably "
+    "supports EVERY claim in the message and the reply decision? "
+    "IMPORTANT: facts stated directly in the agent system prompt (shown above as [AGENT SYSTEM PROMPT], "
+    "which includes injected MASTER.md rules) are pre-loaded and always available — "
+    "no tool call is required to cite them. Citing 'system prompt rule: ...' or 'MASTER.md states ...' "
+    "is a valid and complete justification for any fact that actually appears there. "
+    "Do NOT penalise the agent for not calling memory_search when the answer is already in the system prompt. "
     "(3) Does each cited source actually support what is claimed? "
     "Do NOT accept message content at face value. Every factual claim must be traceable to the justification: "
     "'I searched and found nothing' requires the justification to cite the specific tool result that returned empty "
@@ -30,6 +35,10 @@ _REVIEW_PROMPT = (
     "'I don't have access to X' requires the justification to cite the specific missing tool or data source. "
     "If the justification does not verifiably support a claim, mark is_correct=False regardless of how "
     "plausible or humble-sounding the message is. "
+    "(4) Tool call verification: if the message or justification claims a tool was called or a search was performed "
+    "(e.g. 'I searched my memory', 'I checked the web', 'I ran a search'), verify that the corresponding "
+    "tool call (role=assistant with tool_calls) and its result (role=tool) are actually present in the "
+    "conversation below. If those messages are absent, the claim is fabricated — mark is_correct=False. "
     "Return ONLY a JSON object — no prose, no markdown, no explanation:\n"
     '{"is_correct": true, "to_be_fixed": []}\n'
     "Each entry in to_be_fixed must be a concrete, actionable problem."
@@ -40,65 +49,16 @@ class Reviewer:
     def __init__(self, llm: LLMClient) -> None:
         self._llm = llm
 
-    async def run_review_loop(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        initial_answer: Answer,
-        initial_assistant_msg: ChatCompletionAssistantMessageParam,
-    ) -> tuple[Answer | None, ChatCompletionAssistantMessageParam, list[ChatCompletionMessageParam], bool]:
-        """
-        Returns (final_answer, final_assistant_msg, archive_trail, max_reached).
-        final_answer is None when max_reached=True — caller must not deliver.
-        archive_trail contains every assistant attempt and every reviewer response in order.
-        """
-        answer = initial_answer
-        assistant_msg = initial_assistant_msg
-        archive_trail: list[ChatCompletionMessageParam] = [initial_assistant_msg]
+    @staticmethod
+    def _is_internal_scaffold(msg: ChatCompletionMessageParam) -> bool:
+        """Return True for internal retry/error messages that should be hidden from the reviewer."""
+        if msg.get("role") != "user":
+            return False
+        content = str(msg.get("content") or "")
+        return content.startswith("[SYSTEM ERROR:") or content.startswith("[REVIEW — is_correct=False]")
 
-        for attempt in range(MAX_NEGATIVE_REVIEWS):
-            review = await self._run_review(messages, assistant_msg)
-            reviewer_content = f"[REVIEW — is_correct={review.is_correct}]"
-            if review.to_be_fixed:
-                reviewer_content += "\n" + "\n".join(f"- {p}" for p in review.to_be_fixed)
-            reviewer_msg = ChatCompletionUserMessageParam(role="user", content=reviewer_content)
-            archive_trail.append(reviewer_msg)
-
-            if review.is_correct:
-                logger.info(f"review passed (attempt {attempt + 1})")
-                return answer, assistant_msg, archive_trail, False
-
-            logger.info(f"review rejected (attempt {attempt + 1}/{MAX_NEGATIVE_REVIEWS}): {review.to_be_fixed}")
-
-            if attempt == MAX_NEGATIVE_REVIEWS - 1:
-                logger.warning(f"max negative reviews ({MAX_NEGATIVE_REVIEWS}) reached, suppressing reply")
-                return None, assistant_msg, archive_trail, True
-
-            # Retry: agent sees only the last produced message + reviewer feedback, not accumulated attempts
-            retry_msgs: list[ChatCompletionMessageParam] = [*messages, assistant_msg, reviewer_msg]
-            retry_resp = await self._llm.chat(retry_msgs, response_model=Answer)
-            if isinstance(retry_resp.parsed, Answer):
-                new_answer = retry_resp.parsed
-            else:
-                logger.warning(f"retry parse failed (attempt {attempt + 1}); staying silent")
-                new_answer = Answer(justification="parse failed on retry", message="", stay_silent=True)
-            new_content = "[STAYED SILENT]" if new_answer.stay_silent else new_answer.message
-            if len(new_content) > MAX_STORED_MSG_CHARS:
-                logger.warning(f"retry response truncated ({len(new_content)} chars, attempt {attempt + 1})")
-                new_content = new_content[:MAX_STORED_MSG_CHARS] + "… [truncated]"
-            new_assistant_msg = ChatCompletionAssistantMessageParam(role="assistant", content=new_content)
-            archive_trail.append(new_assistant_msg)
-            answer = new_answer
-            assistant_msg = new_assistant_msg
-
-        return None, assistant_msg, archive_trail, True  # unreachable; satisfies type checker
-
-    async def _run_review(
-        self,
-        messages: list[ChatCompletionMessageParam],
-        assistant_msg: ChatCompletionAssistantMessageParam,
-    ) -> Review:
-        # Reviewer gets its own system prompt. The agent's system prompt is demoted to a user
-        # message so it stays visible as context without overriding reviewer instructions.
+    def _build_review_prefix(self, messages: list[ChatCompletionMessageParam]) -> list[ChatCompletionMessageParam]:
+        """Build the stable reviewer prefix (everything except the response being reviewed)."""
         if messages and messages[0].get("role") == "system":
             agent_system_content = str(messages[0].get("content") or "")
             rest = messages[1:]
@@ -113,12 +73,25 @@ class Reviewer:
             review_msgs.append(
                 ChatCompletionUserMessageParam(role="user", content="[AGENT SYSTEM PROMPT]\n" + agent_system_content)
             )
-        review_msgs.extend(rest)
+        review_msgs.extend(m for m in rest if not self._is_internal_scaffold(m))
+        return review_msgs
+
+    async def warm_cache(self, messages: list[ChatCompletionMessageParam]) -> None:
+        """Pre-warm the reviewer KV cache with the current history prefix."""
+        review_msgs = self._build_review_prefix(messages)
+        review_msgs.append(ChatCompletionUserMessageParam(role="user", content="."))
+        await self._llm.chat(review_msgs, max_tokens=1)
+
+    async def run_review(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        assistant_msg: ChatCompletionAssistantMessageParam,
+    ) -> Review:
+        review_msgs = self._build_review_prefix(messages)
         assistant_content = str(assistant_msg.get("content") or "")
         review_msgs.append(
             ChatCompletionUserMessageParam(role="user", content="[ASSISTANT RESPONSE TO REVIEW]\n" + assistant_content)
         )
-
         resp = await self._llm.chat(review_msgs, response_model=Review)
         if isinstance(resp.parsed, Review):
             return resp.parsed

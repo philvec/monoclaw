@@ -1,5 +1,4 @@
 import asyncio
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -85,7 +84,6 @@ class LLMClient:
         tools: list[dict] | None = None,
         response_model: type[BaseModel] | None = None,
         max_tokens: int | None = None,
-        on_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {
             "model": "local",  # llama.cpp ignores this field
@@ -98,13 +96,15 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        if response_model is not None:
+        if response_model is not None and not tools:
+            # response_format=json_schema suppresses tool calls in llama.cpp — only use it
+            # when there are no real tools so the model is free to call tools when needed.
             schema = response_model.model_json_schema()
             kwargs["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {"name": response_model.__name__, "schema": schema},
             }
-            if not tools and self._schema_tools:
+            if self._schema_tools:
                 kwargs["tools"] = self._schema_tools
                 kwargs["tool_choice"] = "auto"
 
@@ -113,10 +113,6 @@ class LLMClient:
             stream = await self._client.chat.completions.create(**kwargs)
             async for chunk in stream:
                 chunks.append(chunk)
-                if on_delta is not None:
-                    delta = chunk.choices[0].delta if chunk.choices else None
-                    if delta and delta.content:
-                        await on_delta(delta.content)
         except Exception as exc:
             return LLMResponse(content="", finish_reason="error", error=str(exc))
 
@@ -127,11 +123,20 @@ class LLMClient:
                 parsed = response_model.model_validate_json(result.content)
             except Exception:
                 try:
-                    repaired = json_repair.loads(result.content)
+                    # Extract the JSON object from the content — handles preamble text,
+                    # markdown code fences, and any trailing prose.
+                    raw = result.content
+                    start = raw.find("{")
+                    end = raw.rfind("}") + 1
+                    if start != -1 and end > start:
+                        raw = raw[start:end]
+                    repaired = json_repair.loads(raw)
                     if isinstance(repaired, dict):
                         parsed = response_model.model_validate(repaired)
                 except Exception as exc:
                     logger.warning(f"structured output parse failed: {exc}")
+            if parsed is None:
+                logger.warning(f"parse produced None: finish={result.finish_reason!r} content={result.content[:300]!r}")
             result = result.model_copy(update={"parsed": parsed})
         return result
 

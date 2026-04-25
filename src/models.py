@@ -6,7 +6,8 @@ class Answer(BaseModel):
         description=(
             "Why you chose to reply or stay silent, AND — if replying — why you replied this way. "
             "Must cite the specific source that drove both the decision and the content: the exact "
-            "tool result, the named memory entry, the specific past message, or the exact channel rule. "
+            "tool result, the named memory entry, the specific past message, the exact channel rule, "
+            "or a system prompt / MASTER.md rule (cite as 'system prompt states ...'). "
             "Explain why you relied on that source rather than another available one. "
             "Vague justifications ('seemed relevant', 'based on context') are not acceptable."
         ),

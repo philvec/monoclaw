@@ -87,7 +87,7 @@ class WebSocketChannelManager:
             return
 
         self._connections[name] = ws
-        logger.info(f"channel connected: {name!r}")
+        logger.info(f"🔌 channel connected: {name!r}")
 
         try:
             async for raw in ws:
@@ -103,7 +103,8 @@ class WebSocketChannelManager:
                     text=text.strip(),
                     timestamp=int(time.time() * 1000),
                 )
+                logger.info(f"📨 message from {name!r}: {text[:60]!r}")
                 asyncio.create_task(self._on_message(msg))
         finally:
             self._connections.pop(name, None)
-            logger.info(f"channel disconnected: {name!r}")
+            logger.info(f"🔌 channel disconnected: {name!r}")

@@ -63,7 +63,6 @@ async def main() -> None:
             logger.error(f"failed to schedule memory consolidation: {exc}")
 
     async def on_message(msg: InboundMessage) -> None:
-        logger.info(f"message from {msg.channel!r}: {msg.text[:50]!r}")
         try:
             await agent.handle_message(msg)
         except Exception:

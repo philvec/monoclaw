@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -85,7 +86,7 @@ class MCPClient:
                 self._exit_stacks.append(stack)
                 logger.info(f"MCP server {cfg.name!r}: connected, {registered} tools")
             except BaseException as exc:
-                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
                     raise
                 logger.error(f"MCP server {cfg.name!r}: failed to connect: {exc}")
                 try:
