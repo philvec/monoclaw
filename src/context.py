@@ -23,17 +23,24 @@ _TOOL_RESULTS_ARCHIVE = Path("./data/archive/tool_results")
 
 
 class ContextManager:
-    def __init__(self, context_window: int, keep_recent: int = 10, keep_ratio: float = 0.25) -> None:
+    def __init__(
+        self,
+        context_window: int,
+        keep_recent: int = 10,
+        keep_ratio: float = 0.25,
+        max_history_messages: int = 100,
+    ) -> None:
         self._window = context_window
         self._keep_recent = keep_recent
         self._keep_ratio = keep_ratio
+        self._max_history_messages = max_history_messages
         self._used: int = 0
 
     def update(self, response: LLMResponse) -> None:
         self._used = response.input_tokens
 
-    def should_compact(self) -> bool:
-        return self._used > self._window
+    def should_compact(self, msg_count: int = 0) -> bool:
+        return self._used > self._window or msg_count > self._max_history_messages
 
     # ── tier 1: microcompact ──
 

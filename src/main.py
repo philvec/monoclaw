@@ -35,6 +35,7 @@ async def main() -> None:
         context_limit,
         keep_recent=cfg.tools.memory_keep_recent,
         keep_ratio=cfg.llm.compaction_keep_ratio,
+        max_history_messages=cfg.llm.max_history_messages,
     )
     cron = CronService()
     channel_manager = WebSocketChannelManager()

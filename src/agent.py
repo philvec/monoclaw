@@ -56,7 +56,11 @@ _SCHEMA_INSTRUCTIONS = (
     "If stay_silent=False, message MUST be non-empty — an empty message with stay_silent=False is invalid.\n"
     "- stay_silent: True to stay silent (internal work only); False to deliver message.\n"
     "Every response is reviewed. The reviewer verifies that every claim in the message and the "
-    "stay_silent decision are each traceable to a specific cited source in the justification."
+    "stay_silent decision are each traceable to a specific cited source in the justification.\n"
+    "TOOL POLICY: For questions about specific named entities (people, places, organisations, events), "
+    "current facts (prices, schedules, availability, rankings), or any knowledge not confirmed by memory — "
+    "if memory_search finds nothing relevant, call tools__web_search before answering. "
+    "Never rely on training knowledge alone for such facts; it may be stale or wrong."
 )
 
 
@@ -133,6 +137,13 @@ class AgentLoop:
 
     async def _process(self, msg: InboundMessage) -> None:
         """Run one full agent turn: LLM call, tool loop, checkpoint, memory extraction."""
+        self._tool_registry.current_channel = msg.channel
+        try:
+            await self._process_inner(msg)
+        finally:
+            self._tool_registry.current_channel = None
+
+    async def _process_inner(self, msg: InboundMessage) -> None:
         # Assemble turn messages, starting with the system prompt
         messages: list[ChatCompletionMessageParam] = [
             ChatCompletionSystemMessageParam(
@@ -181,8 +192,9 @@ class AgentLoop:
         while iterations < _MAX_TOOL_ITERATIONS:
             iterations += 1
 
+            # Phase 1: tool-capable call (no response_model/response_format — lets model call tools freely)
             logger.info(f"🤖 LLM call start (iter={iterations}, msgs={len(messages)})")
-            response = await self._llm.chat(messages, tools=self._tool_registry.definitions, response_model=Answer)
+            response = await self._llm.chat(messages, tools=self._tool_registry.definitions)
             self._ctx.update(response)
 
             if response.finish_reason != "error":
@@ -196,17 +208,12 @@ class AgentLoop:
                 )
                 break
 
-            initial_answer: Answer | None = response.parsed if isinstance(response.parsed, Answer) else None
-            initial_content = (
-                response.content or ""
-                if initial_answer is None
-                else ("[STAYED SILENT]" if initial_answer.stay_silent else initial_answer.message)
-            )
-            if len(initial_content) > MAX_STORED_MSG_CHARS:
-                logger.warning(f"response truncated ({len(initial_content)} chars, finish={response.finish_reason!r})")
-                initial_content = initial_content[:MAX_STORED_MSG_CHARS] + "… [truncated]"
-            assistant_msg = ChatCompletionAssistantMessageParam(role="assistant", content=initial_content)
             if response.tool_calls:
+                # Build assistant message with tool_calls and append to history
+                tool_content = response.content or ""
+                if len(tool_content) > MAX_STORED_MSG_CHARS:
+                    tool_content = tool_content[:MAX_STORED_MSG_CHARS] + "… [truncated]"
+                assistant_msg = ChatCompletionAssistantMessageParam(role="assistant", content=tool_content)
                 tool_call_list: list[ChatCompletionMessageToolCallParam] = []
                 for tc in response.tool_calls:
                     try:
@@ -220,120 +227,135 @@ class AgentLoop:
                         )
                     )
                 assistant_msg["tool_calls"] = tool_call_list
+                messages.append(assistant_msg)
 
-            # Reviewer runs on Answer turns (no tool_calls). Tool-call iterations have parsed=None;
-            # mixing reviewer with tool_call assistant messages would orphan tool results in history.
-            if initial_answer is not None and not response.tool_calls and msg.channel != CRON_CHANNEL:
-                if not typing_signaled and not initial_answer.stay_silent:
+                if iterations == _MAX_TOOL_ITERATIONS:
+                    # Synthesize error responses so tool_calls are not orphaned in history.
+                    logger.warning(f"tool iteration limit ({_MAX_TOOL_ITERATIONS}) reached — skipping final tool calls")
+                    for tc in response.tool_calls:
+                        messages.append(
+                            ChatCompletionToolMessageParam(
+                                role="tool",
+                                tool_call_id=tc.id,
+                                content=f"error: tool iteration limit ({_MAX_TOOL_ITERATIONS}) reached — not executed",
+                            )
+                        )
+                    break
+
+                if msg.channel != CRON_CHANNEL:
                     try:
                         await self._channel_manager.send_chunk(msg.channel, "")
                         typing_signaled = True
                     except Exception as exc:
                         logger.warning(f"typing signal to {msg.channel!r} failed: {exc}")
-
-                if not initial_answer.stay_silent and not initial_answer.message.strip():
-                    review = Review(
-                        is_correct=False,
-                        to_be_fixed=[
-                            "stay_silent=False but message is empty — provide a non-empty message or set stay_silent=True."
-                        ],
-                    )
-                else:
-                    review = await self._reviewer.run_review(messages, assistant_msg)
-
-                if review_start_idx < 0:
-                    review_start_idx = len(messages)
-                messages.append(assistant_msg)
-
-                if review.is_correct:
-                    review_accepted = True
-                    logger.info(f"✅ review passed (attempt {review_rejections + 1})")
-                    if not initial_answer.stay_silent and initial_answer.message.strip():
-                        preview = initial_answer.message[:120] + ("…" if len(initial_answer.message) > 120 else "")
-                        logger.info(f"📤 delivering to {msg.channel!r}: {preview!r}")
-                        try:
-                            await self._channel_manager.send_full_msg(msg.channel, initial_answer.message)
-                            turn_delivered = True
-                        except Exception as exc:
-                            logger.warning(f"delivery to {msg.channel!r} skipped: {exc}")
-                    else:
-                        logger.info(f"🤫 staying silent on {msg.channel!r}")
-                        turn_delivered = True
-                        if typing_signaled:
-                            try:
-                                await self._channel_manager.end_msg(msg.channel)
-                            except Exception as exc:
-                                logger.warning(f"end signal to {msg.channel!r} skipped: {exc}")
-                    break
-
-                review_rejections += 1
-                reviewer_content = "[REVIEW — is_correct=False]"
-                if review.to_be_fixed:
-                    reviewer_content += "\n" + "\n".join(f"- {p}" for p in review.to_be_fixed)
-                reviewer_content += (
-                    "\nRetry with a corrected response. "
-                    "All three fields are required: justification (str), message (str), stay_silent (bool). "
-                    "If stay_silent=False, message MUST be non-empty."
-                )
-                logger.info(
-                    f"❌ review rejected (attempt {review_rejections}/{MAX_NEGATIVE_REVIEWS}): {review.to_be_fixed}"
-                )
-                messages.append(ChatCompletionUserMessageParam(role="user", content=reviewer_content))
-
-                if review_rejections >= MAX_NEGATIVE_REVIEWS:
-                    logger.warning(f"🚫 max negative reviews ({MAX_NEGATIVE_REVIEWS}) reached, suppressing reply")
-                    self._reviewer.archive_trail(messages[review_start_idx:])
-                    fallback = random.choice(_MAX_REVIEWS_FALLBACK_MESSAGES)
-                    logger.warning(f"sending fallback to {msg.channel!r}: {fallback!r}")
-                    try:
-                        await self._channel_manager.send_full_msg(msg.channel, fallback)
-                    except Exception as exc:
-                        logger.warning(f"fallback delivery to {msg.channel!r} skipped: {exc}")
-                    turn_delivered = True
-                    break
-
-                continue  # reviewer rejected — agent gets full next iteration with tools available
-            else:
-                messages.append(assistant_msg)
-                if not response.tool_calls and msg.channel != CRON_CHANNEL:
-                    logger.warning(f"parse failure on {msg.channel!r} (iter={iterations}), retrying")
-                    messages.append(
-                        ChatCompletionUserMessageParam(
-                            role="user",
-                            content=f"[{SYSERR} — your response did not parse as a valid Answer. "
-                            "Retry with a valid JSON object: justification (str), message (str), stay_silent (bool).]",
-                        )
-                    )
-                    continue
-
-            if response.finish_reason != "tool_calls" or not response.tool_calls:
-                break
-
-            if iterations == _MAX_TOOL_ITERATIONS:
-                # Synthesize error responses so the assistant's tool_calls are not orphaned
-                # (the chat API rejects history containing tool_calls without paired tool results).
-                logger.warning(f"tool iteration limit ({_MAX_TOOL_ITERATIONS}) reached — skipping final tool calls")
                 for tc in response.tool_calls:
-                    messages.append(
-                        ChatCompletionToolMessageParam(
-                            role="tool",
-                            tool_call_id=tc.id,
-                            content=f"error: tool iteration limit ({_MAX_TOOL_ITERATIONS}) reached — not executed",
-                        )
-                    )
+                    logger.info(f"🔧 tool call: {tc.name!r}")
+                    result = await self._tool_registry.execute(tc.name, tc.arguments)
+                    messages.append(ChatCompletionToolMessageParam(role="tool", tool_call_id=tc.id, content=result))
+                continue
+
+            # No tool calls — Phase 2: structured call (response_format enforced, no real tools)
+            if msg.channel == CRON_CHANNEL:
                 break
 
-            # Execute all requested tools
-            if msg.channel != CRON_CHANNEL:
+            struct_msgs: list[ChatCompletionMessageParam] = list(messages)
+            if response.content:
+                struct_msgs.append(ChatCompletionAssistantMessageParam(role="assistant", content=response.content))
+            struct_msgs.append(
+                ChatCompletionUserMessageParam(
+                    role="user",
+                    content="Produce your Answer as a JSON object: justification (str), message (str), stay_silent (bool).",
+                )
+            )
+            struct_resp = await self._llm.chat(struct_msgs, response_model=Answer)
+            initial_answer: Answer | None = struct_resp.parsed if isinstance(struct_resp.parsed, Answer) else None
+
+            if initial_answer is None:
+                logger.warning(f"parse failure on {msg.channel!r} (iter={iterations}), retrying")
+                if response.content:
+                    messages.append(ChatCompletionAssistantMessageParam(role="assistant", content=response.content))
+                messages.append(
+                    ChatCompletionUserMessageParam(
+                        role="user",
+                        content=f"[{SYSERR} — your response did not parse as a valid Answer. "
+                        "Retry with a valid JSON object: justification (str), message (str), stay_silent (bool).]",
+                    )
+                )
+                continue
+
+            initial_content = "[STAYED SILENT]" if initial_answer.stay_silent else initial_answer.message
+            if len(initial_content) > MAX_STORED_MSG_CHARS:
+                logger.warning(f"response truncated ({len(initial_content)} chars)")
+                initial_content = initial_content[:MAX_STORED_MSG_CHARS] + "… [truncated]"
+            assistant_msg = ChatCompletionAssistantMessageParam(role="assistant", content=initial_content)
+
+            if not typing_signaled and not initial_answer.stay_silent:
                 try:
                     await self._channel_manager.send_chunk(msg.channel, "")
                     typing_signaled = True
                 except Exception as exc:
                     logger.warning(f"typing signal to {msg.channel!r} failed: {exc}")
-            for tc in response.tool_calls:
-                logger.info(f"🔧 tool call: {tc.name!r}")
-                result = await self._tool_registry.execute(tc.name, tc.arguments)
-                messages.append(ChatCompletionToolMessageParam(role="tool", tool_call_id=tc.id, content=result))
+
+            if not initial_answer.stay_silent and not initial_answer.message.strip():
+                review = Review(
+                    is_correct=False,
+                    to_be_fixed=[
+                        "stay_silent=False but message is empty — provide a non-empty message or set stay_silent=True."
+                    ],
+                )
+            else:
+                review = await self._reviewer.run_review(messages, assistant_msg)
+
+            if review_start_idx < 0:
+                review_start_idx = len(messages)
+            messages.append(assistant_msg)
+
+            if review.is_correct:
+                review_accepted = True
+                logger.info(f"✅ review passed (attempt {review_rejections + 1})")
+                if not initial_answer.stay_silent and initial_answer.message.strip():
+                    preview = initial_answer.message[:120] + ("…" if len(initial_answer.message) > 120 else "")
+                    logger.info(f"📤 delivering to {msg.channel!r}: {preview!r}")
+                    try:
+                        await self._channel_manager.send_full_msg(msg.channel, initial_answer.message)
+                        turn_delivered = True
+                    except Exception as exc:
+                        logger.warning(f"delivery to {msg.channel!r} skipped: {exc}")
+                else:
+                    logger.info(f"🤫 staying silent on {msg.channel!r}")
+                    turn_delivered = True
+                    if typing_signaled:
+                        try:
+                            await self._channel_manager.end_msg(msg.channel)
+                        except Exception as exc:
+                            logger.warning(f"end signal to {msg.channel!r} skipped: {exc}")
+                break
+
+            review_rejections += 1
+            reviewer_content = "[REVIEW — is_correct=False]"
+            if review.to_be_fixed:
+                reviewer_content += "\n" + "\n".join(f"- {p}" for p in review.to_be_fixed)
+            reviewer_content += (
+                "\nRetry with a corrected response. "
+                "All three fields are required: justification (str), message (str), stay_silent (bool). "
+                "If stay_silent=False, message MUST be non-empty."
+            )
+            logger.info(f"❌ review rejected (attempt {review_rejections}/{MAX_NEGATIVE_REVIEWS}): {review.to_be_fixed}")
+            messages.append(ChatCompletionUserMessageParam(role="user", content=reviewer_content))
+
+            if review_rejections >= MAX_NEGATIVE_REVIEWS:
+                logger.warning(f"🚫 max negative reviews ({MAX_NEGATIVE_REVIEWS}) reached, suppressing reply")
+                self._reviewer.archive_trail(messages[review_start_idx:])
+                fallback = random.choice(_MAX_REVIEWS_FALLBACK_MESSAGES)
+                logger.warning(f"sending fallback to {msg.channel!r}: {fallback!r}")
+                try:
+                    await self._channel_manager.send_full_msg(msg.channel, fallback)
+                except Exception as exc:
+                    logger.warning(f"fallback delivery to {msg.channel!r} skipped: {exc}")
+                turn_delivered = True
+                break
+
+            continue  # reviewer rejected — agent gets full next iteration with tools available
 
         # Safety net: if the loop exhausted retries on parse failures, client is still waiting
         if not turn_delivered and msg.channel != CRON_CHANNEL:
@@ -442,7 +464,7 @@ class AgentLoop:
             logger.error(f"failed to append to checkpoint: {exc}")
 
     async def _compact_session(self) -> None:
-        if not self._ctx.should_compact():
+        if not self._ctx.should_compact(len(self._session.history)):
             return
         async with self._session.lock:
             # Cancel inside the lock so no new turn can slip in and create a replacement

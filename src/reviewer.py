@@ -39,6 +39,12 @@ _REVIEW_PROMPT = (
     "(e.g. 'I searched my memory', 'I checked the web', 'I ran a search'), verify that the corresponding "
     "tool call (role=assistant with tool_calls) and its result (role=tool) are actually present in the "
     "conversation below. If those messages are absent, the claim is fabricated — mark is_correct=False. "
+    "(5) Web search for external facts: if the message states a fact about a specific named entity "
+    "(person, place, organisation, event), current data (price, schedule, ranking, availability), "
+    "or any time-sensitive claim that is NOT present in the system prompt and NOT backed by a cited memory entry, "
+    "verify that tools__web_search was called (role=assistant tool_calls containing web_search, "
+    "followed by a role=tool result). If the agent relied solely on training knowledge for such a claim "
+    "without searching, mark is_correct=False. "
     "Return ONLY a JSON object — no prose, no markdown, no explanation:\n"
     '{"is_correct": true, "to_be_fixed": []}\n'
     "Each entry in to_be_fixed must be a concrete, actionable problem."

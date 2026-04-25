@@ -97,8 +97,7 @@ class LLMClient:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
         if response_model is not None and not tools:
-            # response_format=json_schema suppresses tool calls in llama.cpp — only use it
-            # when there are no real tools so the model is free to call tools when needed.
+            # Phase 2 / reviewer / extractor calls: no real tools, enforce JSON schema.
             schema = response_model.model_json_schema()
             kwargs["response_format"] = {
                 "type": "json_schema",

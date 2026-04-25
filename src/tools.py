@@ -70,6 +70,7 @@ class ToolRegistry:
         self._mcp_client: Any = None
         self._mcp_schemas: list[dict] = []
         self._mcp_names: set[str] = set()
+        self.current_channel: str | None = None
 
     @classmethod
     def from_config(
@@ -116,6 +117,12 @@ class ToolRegistry:
         return [t.to_schema() for t in self._tools.values()] + self._mcp_schemas
 
     async def execute(self, name: str, arguments: dict) -> str:
+        if name == "send_message" and self.current_channel is not None:
+            if arguments.get("channel") == self.current_channel:
+                return (
+                    f"error: cannot send_message to the current input channel ({self.current_channel!r}) — "
+                    "reply through the standard Answer instead"
+                )
         if name in self._tools:
             tool = self._tools[name]
             try:
