@@ -4,7 +4,7 @@
 
 Personal AI assistant with one continuous session, WebSocket-native multi-channel interaction, minimal codebase for clarity and security.
 
-**codebase:** `2946 lines across 15 files (src/*.py, Dockerfile, pyproject.toml)`
+**codebase:** `2963 lines across 15 files (src/*.py, Dockerfile, pyproject.toml)`
 
 ---
 

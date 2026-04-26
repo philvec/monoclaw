@@ -60,7 +60,17 @@ _SCHEMA_INSTRUCTIONS = (
     "TOOL POLICY: For questions about specific named entities (people, places, organisations, events), "
     "current facts (prices, schedules, availability, rankings), or any knowledge not confirmed by memory — "
     "if memory_search finds nothing relevant, call tools__web_search before answering. "
-    "Never rely on training knowledge alone for such facts; it may be stale or wrong."
+    "Never rely on training knowledge alone for such facts; it may be stale or wrong.\n"
+    "ACTION RULE: Any action that requires a tool (editing a file, writing a file, running a command) "
+    "MUST be executed via a tool call BEFORE your final Answer. "
+    "Never state in your message that you edited, modified, updated, or wrote a file unless "
+    "an edit_file or write_file tool result already exists in this turn's conversation. "
+    "If the reviewer rejects your Answer for a missing tool call, your very next response "
+    "MUST call that tool — simply rewording the claim without calling the tool will be rejected again.\n"
+    "SILENCE AFTER REJECTION: If the reviewer previously rejected your response (you will see "
+    "[REVIEW — is_correct=False] in the conversation), you MUST NOT switch to stay_silent=True on "
+    "the retry. The user is waiting for a response — silence does not fix the rejection. "
+    "Fix the specific problems cited and deliver a non-silent answer."
 )
 
 
@@ -249,7 +259,11 @@ class AgentLoop:
                     except Exception as exc:
                         logger.warning(f"typing signal to {msg.channel!r} failed: {exc}")
                 for tc in response.tool_calls:
-                    logger.info(f"🔧 tool call: {tc.name!r}")
+                    def _trunc(v: object, n: int = 30) -> str:
+                        s = json.dumps(v) if not isinstance(v, str) else v
+                        return s if len(s) <= n else s[:n] + "..."
+                    args_preview = "{" + ", ".join(f"{k}: {_trunc(v)}" for k, v in (tc.arguments or {}).items()) + "}"
+                    logger.info(f"🔧 tool call: {tc.name!r} args={args_preview}")
                     result = await self._tool_registry.execute(tc.name, tc.arguments)
                     messages.append(ChatCompletionToolMessageParam(role="tool", tool_call_id=tc.id, content=result))
                 continue
@@ -264,11 +278,18 @@ class AgentLoop:
             struct_msgs.append(
                 ChatCompletionUserMessageParam(
                     role="user",
-                    content="Produce your Answer as a JSON object: justification (str), message (str), stay_silent (bool).",
+                    content=(
+                        "Produce your Answer as a JSON object: justification (str), message (str), stay_silent (bool). "
+                        "IMPORTANT: if this task required a file edit or other tool action that has NOT yet been "
+                        "performed in this turn, do NOT claim it in message — call the tool first."
+                    ),
                 )
             )
             struct_resp = await self._llm.chat(struct_msgs, response_model=Answer)
             initial_answer: Answer | None = struct_resp.parsed if isinstance(struct_resp.parsed, Answer) else None
+            if initial_answer is not None:
+                raw_preview = initial_answer.message[:200] + ("…" if len(initial_answer.message) > 200 else "")
+                logger.info(f"🗒️ agent answer (pre-review): silent={initial_answer.stay_silent} msg={raw_preview!r}")
 
             if initial_answer is None:
                 logger.warning(f"parse failure on {msg.channel!r} (iter={iterations}), retrying")
@@ -312,7 +333,8 @@ class AgentLoop:
 
             if review.is_correct:
                 review_accepted = True
-                logger.info(f"✅ review passed (attempt {review_rejections + 1})")
+                just_preview = initial_answer.justification[:200] + ("…" if len(initial_answer.justification) > 200 else "")
+                logger.info(f"✅ review passed (attempt {review_rejections + 1}) justification={just_preview!r}")
                 if not initial_answer.stay_silent and initial_answer.message.strip():
                     preview = initial_answer.message[:120] + ("…" if len(initial_answer.message) > 120 else "")
                     logger.info(f"📤 delivering to {msg.channel!r}: {preview!r}")
@@ -336,9 +358,12 @@ class AgentLoop:
             if review.to_be_fixed:
                 reviewer_content += "\n" + "\n".join(f"- {p}" for p in review.to_be_fixed)
             reviewer_content += (
-                "\nRetry with a corrected response. "
-                "All three fields are required: justification (str), message (str), stay_silent (bool). "
-                "If stay_silent=False, message MUST be non-empty."
+                "\nRetry. If the rejection cited a missing tool call (e.g. edit_file, write_file, shell), "
+                "you MUST call that tool in your very next response — do NOT reword the claim without executing the action first. "
+                "All three fields required: justification (str), message (str), stay_silent (bool). "
+                "If stay_silent=False, message MUST be non-empty. "
+                "Do NOT switch to stay_silent=True to escape the rejection — the user is waiting for a response. "
+                "Fix the specific problem and deliver a non-silent answer."
             )
             logger.info(f"❌ review rejected (attempt {review_rejections}/{MAX_NEGATIVE_REVIEWS}): {review.to_be_fixed}")
             messages.append(ChatCompletionUserMessageParam(role="user", content=reviewer_content))
