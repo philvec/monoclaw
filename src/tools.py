@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from channels import WebSocketChannelManager
 from config import Config, logger
@@ -71,6 +71,7 @@ class ToolRegistry:
         self._mcp_schemas: list[dict] = []
         self._mcp_names: set[str] = set()
         self.current_channel: str | None = None
+        self._last_file: str | None = None
 
     @classmethod
     def from_config(
@@ -125,8 +126,22 @@ class ToolRegistry:
                 )
         if name in self._tools:
             tool = self._tools[name]
+            # Track last accessed file so we can hint on missing-path errors
+            if "path" in arguments and isinstance(arguments["path"], str):
+                self._last_file = arguments["path"]
             try:
                 result = await tool.execute(tool.Params.model_validate(arguments))
+            except ValidationError as exc:
+                logger.exception(f"tool {name!r} raised")
+                missing = [str(e["loc"][0]) for e in exc.errors() if e["type"] == "missing"]
+                if missing:
+                    hint = f" (last file used: {self._last_file!r})" if self._last_file and "path" in missing else ""
+                    return (
+                        f"error: {name} missing required parameter(s): {', '.join(missing)}{hint}. "
+                        f"Retry with ALL required fields: "
+                        + ", ".join(tool.Params.model_json_schema().get("required", []))
+                    )
+                return f"error: {exc}"
             except Exception as exc:
                 logger.exception(f"tool {name!r} raised")
                 return f"error: {exc}"
@@ -174,7 +189,7 @@ class WriteFileTool(Tool["WriteFileTool.Params"]):
     """Write content to a file inside the workspace, creating it if needed."""
 
     class Params(BaseModel):
-        path: str
+        path: str = Field(description="Relative path to file")
         content: str
 
     async def execute(self, params: Params) -> str:  # type: ignore[override]
@@ -185,10 +200,10 @@ class WriteFileTool(Tool["WriteFileTool.Params"]):
 
 
 class EditFileTool(Tool["EditFileTool.Params"]):
-    """Replace an exact string in a file."""
+    """Replace an exact string in a file. REQUIRED: path, old_string, new_string."""
 
     class Params(BaseModel):
-        path: str
+        path: str = Field(description="Relative path to file (REQUIRED)")
         old_string: str = Field(description="Exact text to find")
         new_string: str = Field(description="Replacement text")
 

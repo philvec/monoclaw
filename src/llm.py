@@ -15,7 +15,17 @@ def _parse_args(raw: str | None) -> dict:
     """Repair and parse a (potentially malformed) JSON arguments string into a dict."""
     try:
         result = json_repair.loads(raw or "{}")
-        return result if isinstance(result, dict) else {}
+        if not isinstance(result, dict):
+            return {}
+        # json_repair sometimes mangles keys when HTML attribute quotes are unescaped,
+        # producing prefixes like ', "' (e.g. ', "path' instead of 'path').
+        # Strip leading punctuation/whitespace from any such mangled keys.
+        cleaned: dict = {}
+        for k, v in result.items():
+            clean_k = k.lstrip(' ,\'"')
+            target = clean_k if clean_k and clean_k not in cleaned else k
+            cleaned[target] = v
+        return cleaned
     except Exception:
         return {}
 
