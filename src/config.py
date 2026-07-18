@@ -43,6 +43,19 @@ class ToolsConfig(BaseModel):
     memory_consolidation_cron: str = ""
 
 
+class ClassifierConfig(BaseModel):
+    # Fast pre-agent classifier (llama.cpp service, e.g. Qwen3.5-2B). Set via CLASSIFIER__BASE_URL,
+    # analogous to LLM__BASE_URL for the main model. Empty ⇒ the whole layer is disabled at startup.
+    base_url: str = ""
+    # Whitelist of MCP tool names the classifier may call — same names/style as monoclaw-tools
+    # TOOLS__ENABLED, over the SAME MCP servers the main model uses. Set via CLASSIFIER__TOOLS_ENABLED
+    # (JSON list, e.g. '["ha_light_set"]'). NOTE the deliberate asymmetry: for the main model empty
+    # means ALL tools, but for the classifier empty means NO tools — grant fast-path tools explicitly.
+    tools_enabled: list[str] = []
+    max_tokens: int = 512
+    timeout_s: float = 8.0
+
+
 class MCPServerConfig(BaseModel):
     name: str
     transport: Literal["stdio", "sse", "http"] = "stdio"
@@ -55,6 +68,7 @@ class MCPServerConfig(BaseModel):
 class Config(BaseSettings):
     llm: LLMConfig = LLMConfig()
     tools: ToolsConfig = ToolsConfig()
+    classifier: ClassifierConfig = ClassifierConfig()
     mcp: list[MCPServerConfig] = []
     monoclaw_tools_url: str = ""  # shorthand: auto-registers monoclaw-tools sidecar when set
 

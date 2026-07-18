@@ -73,6 +73,37 @@ _SCHEMA_INSTRUCTIONS = (
     "Fix the specific problems cited and deliver a non-silent answer."
 )
 
+_CLASSIFIER_INSTRUCTIONS = (
+    "FAST PRE-AGENT CLASSIFIER:\n"
+    "Before a message reaches you, every WebSocket message first passes through a fast, local "
+    "classification layer (a small Qwen3.5-2B model). It returns structured output with a fixed, "
+    "immutable schema: response_mode ('immediate' or 'complex'), output (text), and — when tools are "
+    "configured — an optional tool_call.\n"
+    "- complex → the layer does nothing; the message reaches you normally, as if it weren't there.\n"
+    "- immediate → the layer answers the user directly with `output` and does NOT invoke you this turn; "
+    "it still records the turn (user message + reply) in history so you know what was already done. In "
+    "immediate mode the layer may also execute a whitelisted MCP tool (e.g. light control) and record a "
+    "confirmation of the action in history.\n"
+    "The classifier's behaviour is driven SOLELY by its own system prompt — a plain text file at "
+    "data/memory/fast_classifier_system.md (same directory as MASTER.md). The file is re-read on every "
+    "message, so your edits take effect immediately, without a restart. The output schema is hard-coded "
+    "and immutable — do NOT try to change it. To change the fast classifier's behaviour, edit "
+    "data/memory/fast_classifier_system.md with your file tools; when the user asks for such a change, "
+    "do it that way.\n"
+    "If you see a '[FAST CLASSIFIER ERROR: ...]' message in a turn, the layer hit an error (bad output "
+    "format, model error, missing prompt file). The user's message still reached you — treat it as a "
+    "signal that the classifier's prompt or configuration needs fixing."
+)
+
+
+def build_channel_ctx(channel: str) -> str:
+    """Channel + current-datetime note injected ahead of the user's message.
+
+    Built at the dispatch layer (main.on_message / handle_cron) and passed via the
+    ``preamble`` parameter, rather than deep inside the turn assembly."""
+    now = datetime.now(timezone.utc).astimezone()
+    return f"INPUT CHANNEL: {channel}\nCURRENT DATETIME: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+
 
 class Session(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -106,7 +137,13 @@ class AgentLoop:
         self._pending_warm_reviewer: asyncio.Task | None = None
 
     def _build_system_prompt(self) -> str:
-        return self._memory.build_system_prompt() + "\n\n" + _SCHEMA_INSTRUCTIONS
+        return (
+            self._memory.build_system_prompt()
+            + "\n\n"
+            + _SCHEMA_INSTRUCTIONS
+            + "\n\n"
+            + _CLASSIFIER_INSTRUCTIONS
+        )
 
     async def startup(self) -> None:
         """Restore checkpoint and pre-warm the LLM cache."""
@@ -121,17 +158,34 @@ class AgentLoop:
 
     # Public entry points
 
-    async def handle_message(self, msg: InboundMessage) -> None:
+    async def handle_message(self, msg: InboundMessage, preamble: str | None = None) -> None:
         logger.info(f"🔒 acquiring session lock for {msg.channel!r}")
         self._foreground_count += 1
         self._foreground_idle.clear()
         try:
             async with self._session.lock:
-                await self._process(msg)
+                await self._process(msg, preamble)
         finally:
             self._foreground_count -= 1
             if self._foreground_count == 0:
                 self._foreground_idle.set()
+
+    async def record_immediate(self, msg: InboundMessage, output: str) -> None:
+        """Fast-path answer from the pre-agent classifier: deliver ``output`` to the
+        channel and record the turn (user message + answer) into history WITHOUT
+        invoking the main model, so the next full turn sees what was already done.
+
+        Delivery happens first: if it fails, this raises before any history is written,
+        letting the caller fall back to the full agent cleanly with no partial state."""
+        if msg.channel != CRON_CHANNEL:
+            await self._channel_manager.send_full_msg(msg.channel, output)
+        async with self._session.lock:
+            user_msg = ChatCompletionUserMessageParam(role="user", content=msg.text)
+            assistant_msg = ChatCompletionAssistantMessageParam(role="assistant", content=output)
+            self._session.history.append(user_msg)
+            self._session.history.append(assistant_msg)
+            self._append_to_checkpoint(user_msg)
+            self._append_to_checkpoint(assistant_msg)
 
     async def handle_cron(self, job: CronJob) -> None:
         synthetic = InboundMessage(channel=CRON_CHANNEL, text=job.message, timestamp=0)
@@ -139,21 +193,21 @@ class AgentLoop:
         self._foreground_idle.clear()
         try:
             async with self._session.lock:
-                await self._process(synthetic)
+                await self._process(synthetic, build_channel_ctx(CRON_CHANNEL))
         finally:
             self._foreground_count -= 1
             if self._foreground_count == 0:
                 self._foreground_idle.set()
 
-    async def _process(self, msg: InboundMessage) -> None:
+    async def _process(self, msg: InboundMessage, preamble: str | None = None) -> None:
         """Run one full agent turn: LLM call, tool loop, checkpoint, memory extraction."""
         self._tool_registry.current_channel = msg.channel
         try:
-            await self._process_inner(msg)
+            await self._process_inner(msg, preamble)
         finally:
             self._tool_registry.current_channel = None
 
-    async def _process_inner(self, msg: InboundMessage) -> None:
+    async def _process_inner(self, msg: InboundMessage, preamble: str | None = None) -> None:
         # Assemble turn messages, starting with the system prompt
         messages: list[ChatCompletionMessageParam] = [
             ChatCompletionSystemMessageParam(
@@ -176,13 +230,13 @@ class AgentLoop:
                 )
         messages.extend(self._session.history)
 
-        # Inject channel context as a user note (system role not allowed mid-conversation)
-        now = datetime.now(timezone.utc).astimezone()
-        ctx_lines = [
-            f"INPUT CHANNEL: {msg.channel}",
-            f"CURRENT DATETIME: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
-        ]
-        messages.append(ChatCompletionUserMessageParam(role="user", content="\n".join(ctx_lines)))
+        # Ephemeral pre-message note built by the dispatch layer (main.on_message / handle_cron):
+        # channel + datetime context, plus any fast-classifier error. Included in THIS turn's prompt
+        # (system role isn't allowed mid-conversation, so it's a user note) but never persisted to
+        # history — the datetime is regenerated every turn and old errors shouldn't linger.
+        if preamble:
+            messages.append(ChatCompletionUserMessageParam(role="user", content=preamble))
+
         user_msg = ChatCompletionUserMessageParam(role="user", content=msg.text)
         messages.append(user_msg)
 

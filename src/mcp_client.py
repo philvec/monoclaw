@@ -107,6 +107,30 @@ class MCPClient:
     def tool_schemas(self) -> list[dict]:
         return [entry.schema for entry in self._tools.values()]
 
+    def schemas_for(self, bare_names: list[str]) -> list[dict]:
+        """Function schemas whose bare (unqualified) tool name is in ``bare_names`` — the same
+        naming as monoclaw-tools TOOLS__ENABLED. Used to scope tools to the fast classifier."""
+        return [entry.schema for entry in self._tools.values() if entry.tool_name in bare_names]
+
+    async def call_checked(self, qualified_name: str, arguments: dict) -> tuple[bool, str]:
+        """Like execute(), but returns (ok, text) using the tool's isError flag — for callers that
+        must branch on success/failure (the fast classifier) instead of feeding a string to a model."""
+        entry = self._tools.get(qualified_name)
+        if entry is None:
+            return False, f"unknown MCP tool: {qualified_name!r}"
+        try:
+            result = await entry.session.call_tool(entry.tool_name, arguments=arguments)
+            parts = []
+            for c in result.content:
+                if isinstance(c, mcp_types.TextContent):
+                    parts.append(c.text)
+                else:
+                    parts.append(f"[{type(c).__name__}]")
+            return (not getattr(result, "isError", False)), "\n".join(parts)
+        except Exception as exc:
+            logger.error(f"MCP tool {qualified_name!r} raised: {exc}")
+            return False, f"error: {exc}"
+
     async def execute(self, qualified_name: str, arguments: dict) -> str:
         entry = self._tools.get(qualified_name)
         if entry is None:

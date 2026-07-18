@@ -3,8 +3,9 @@ import signal as _signal
 import sys
 from pathlib import Path
 
-from agent import AgentLoop
+from agent import AgentLoop, build_channel_ctx
 from channels import InboundMessage, WebSocketChannelManager
+from classifier import FastClassifier
 from config import load_config, logger
 from context import ContextManager
 from llm import LLMClient
@@ -63,9 +64,29 @@ async def main() -> None:
         except Exception as exc:
             logger.error(f"failed to schedule memory consolidation: {exc}")
 
+    # Pre-agent input classification layer: sits right after the WebSocket
+    # (channels.py) and before the Monoclaw agent. Decides per message whether to
+    # answer immediately (fast path) or pass through to the full agent.
+    fast_classifier = FastClassifier(cfg.classifier, agent, mcp)
+    fast_classifier.log_startup()
+
     async def on_message(msg: InboundMessage) -> None:
         try:
-            await agent.handle_message(msg)
+            decision = await fast_classifier.process(msg)
+        except Exception:
+            # Defensive: process() is already fail-safe, but never let the layer block a message.
+            logger.exception(f"fast classifier layer crashed on {msg.channel!r}; falling through to agent")
+            decision = None
+        if decision is not None and decision.handled:
+            return  # immediate: the layer answered and recorded the turn
+
+        # Build the per-turn context (channel + datetime) here, at the dispatch layer, and prepend
+        # any fast-classifier error note. Both travel to the agent via the ephemeral `preamble`.
+        ctx = build_channel_ctx(msg.channel)
+        error_note = decision.preamble if decision is not None else None
+        preamble = f"{error_note}\n{ctx}" if error_note else ctx
+        try:
+            await agent.handle_message(msg, preamble=preamble)
         except Exception:
             logger.exception(f"unhandled error processing message from {msg.channel!r}")
 
