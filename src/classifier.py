@@ -231,6 +231,8 @@ class FastClassifier:
         if not system_prompt:
             raise ValueError(f"system prompt file is empty: {SYSTEM_PROMPT_PATH}")
         system_prompt += self._tools_doc  # append the self-documenting available-tools section
+        # Compact one-line JSON: response_format enforces the SCHEMA, not conciseness — a pretty-printed nested verdict wastes ~34 decode tokens ≈ 0.8s/command (~1.9× slower). Verified 2026-07-20.
+        system_prompt += "\n\nFORMAT WYJŚCIA: zwróć werdykt jako kompaktowy JSON w jednej linii, bez spacji, wcięć ani znaków nowej linii (minified)."
 
         resp = await self._client.chat.completions.create(
             model="local",  # llama.cpp ignores this field
