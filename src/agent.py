@@ -306,6 +306,18 @@ class AgentLoop:
                         )
                     break
 
+                # Prose the model emits alongside tool calls is addressed to the user ("checking
+                # which lights are on…"), so deliver it now — before the tools run, which is the
+                # only moment it is still useful. Deliberately NOT setting turn_delivered: the
+                # answer is still outstanding, so the safety net below must stay armed.
+                if response.content and response.content.strip() and msg.channel != CRON_CHANNEL:
+                    preview = response.content[:120] + ("…" if len(response.content) > 120 else "")
+                    logger.info(f"📤 delivering interim to {msg.channel!r}: {preview!r}")
+                    try:
+                        await self._channel_manager.send_full_msg(msg.channel, response.content)
+                    except Exception as exc:
+                        logger.warning(f"interim delivery to {msg.channel!r} skipped: {exc}")
+
                 if msg.channel != CRON_CHANNEL:
                     try:
                         await self._channel_manager.send_chunk(msg.channel, "")
