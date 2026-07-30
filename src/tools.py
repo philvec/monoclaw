@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 from channels import WebSocketChannelManager
 from config import Config, logger
 from llm import LLMClient
+from mcp_client import note_mcp_result
 from memory_store import MemoryStore
 
 from datetime import datetime, timezone
@@ -152,7 +153,9 @@ class ToolRegistry:
             except (TypeError, ValueError):
                 return str(result)
         if self._mcp_client is not None and name in self._mcp_names:
-            return await self._mcp_client.execute(name, arguments)
+            ok, text = await self._mcp_client.call_checked(name, arguments)
+            note_mcp_result(ok, text, self.current_channel)  # may restart the process
+            return text
         return f"unknown tool: {name!r}"
 
 

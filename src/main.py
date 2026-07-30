@@ -1,6 +1,7 @@
 import asyncio
 import signal as _signal
 import sys
+import time
 from pathlib import Path
 
 from agent import AgentLoop, build_channel_ctx
@@ -9,7 +10,7 @@ from classifier import FastClassifier
 from config import load_config, logger
 from context import ContextManager
 from llm import LLMClient
-from mcp_client import MCPClient
+from mcp_client import MCPClient, consume_restart_marker
 from memory import MemoryManager
 from memory_store import MemoryStore
 from scheduler import CronService, CronSchedule
@@ -103,6 +104,15 @@ async def main() -> None:
             loop.add_signal_handler(sig, _shutdown)
         except NotImplementedError:
             pass  # Windows
+
+    # Came back from a self-restart (mcp_client) — tell the agent tooling is usable again.
+    if (resume_channel := consume_restart_marker()) is not None:
+        async def _resume() -> None:
+            await asyncio.sleep(5)  # let channel clients (signal-bridge) reconnect first
+            await agent.handle_message(InboundMessage(
+                channel=resume_channel, text="solved, you can now use the tool retry",
+                timestamp=int(time.time())))
+        asyncio.create_task(_resume(), name="mcp-resume")
 
     logger.info("monoclaw starting")
     await channel_manager.start(on_message)

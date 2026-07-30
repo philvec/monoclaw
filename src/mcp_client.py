@@ -1,7 +1,9 @@
 import asyncio
+import json
 import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
@@ -13,6 +15,43 @@ from config import MCPServerConfig, logger
 
 RECONNECT_DELAY = 5.0  # backoff between failed connection attempts
 RECONNECT_TIMEOUT = 30.0  # how long a caller waits for its server to come back
+
+_RESTART_MARKER = Path("./data/mcp_restart.json")
+# Transport breakage a fresh process can plausibly clear. Deliberately narrow: tool-level
+# failures (bad args, 404 from web_fetch) must never restart us.
+_RESTART_HINTS = ("session terminated", "session not found", "server disconnected",
+                  "connection refused", "connection reset", "all connection attempts failed")
+
+
+def note_mcp_result(ok: bool, text: str, channel: str | None) -> None:
+    """Last-resort escalation after the in-process reconnect above has already failed.
+
+    Exits so Docker's ``restart: always`` rebuilds everything; main() then re-invokes the agent
+    on ``channel``. The marker outlives the restart, so a second failure cannot crashloop — it
+    blocks until a call succeeds, which is what a manual fix looks like from in here.
+    """
+    if ok:
+        _RESTART_MARKER.unlink(missing_ok=True)  # tooling healthy again — re-arm
+        return
+    if _RESTART_MARKER.exists() or not any(h in text.lower() for h in _RESTART_HINTS):
+        return
+    _RESTART_MARKER.write_text(json.dumps({"channel": channel, "error": text[:200], "pending": True}))
+    logger.error(f"MCP tooling unrecoverable ({text[:120]}) — restarting process")
+    os._exit(1)
+
+
+def consume_restart_marker() -> str | None:
+    """Channel to resume after a self-restart, else None. Clears only ``pending``, so the marker
+    keeps blocking further self-restarts until a tool call actually succeeds."""
+    try:
+        data = json.loads(_RESTART_MARKER.read_text())
+    except (OSError, ValueError):
+        return None
+    if not data.get("pending"):
+        return None
+    data["pending"] = False
+    _RESTART_MARKER.write_text(json.dumps(data))
+    return data.get("channel")
 
 
 @dataclass
@@ -180,10 +219,6 @@ class MCPClient:
         return False, f"unknown MCP tool: {qualified_name!r}"  # unreachable
 
     async def call_checked(self, qualified_name: str, arguments: dict) -> tuple[bool, str]:
-        """Like execute(), but returns (ok, text) using the tool's isError flag — for callers that
-        must branch on success/failure (the fast classifier) instead of feeding a string to a model."""
+        """Invoke a tool, returning (ok, text) where ok is the inverse of the tool's isError flag —
+        callers branch on it to decide between falling back and escalating."""
         return await self._call(qualified_name, arguments)
-
-    async def execute(self, qualified_name: str, arguments: dict) -> str:
-        _, text = await self._call(qualified_name, arguments)
-        return text
