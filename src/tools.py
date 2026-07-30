@@ -119,6 +119,12 @@ class ToolRegistry:
         return [t.to_schema() for t in self._tools.values()] + self._mcp_schemas
 
     async def execute(self, name: str, arguments: dict) -> str:
+        if name == "send_message" and self.current_channel is not None:
+            if arguments.get("channel") == self.current_channel:
+                return (
+                    f"error: cannot send_message to the current input channel ({self.current_channel!r}) — "
+                    "reply through the standard Answer instead"
+                )
         if name in self._tools:
             tool = self._tools[name]
             # Track last accessed file so we can hint on missing-path errors
@@ -443,13 +449,11 @@ one-shot self-wakeups that complete a workflow."""
 
 
 class SendMessageTool(Tool["SendMessageTool.Params"]):
-    """Send a complete message to a named channel, delivered immediately. Two uses. FAN-OUT: \
-notify someone on a DIFFERENT channel from the inbound one (e.g. cc the wife while replying to \
-a friend). EXTRA MESSAGES: send additional messages to the INPUT CHANNEL during a turn — a \
-"checking…" note before a slow lookup, or a long answer split into parts. Your assistant \
-content is still auto-delivered to the INPUT CHANNEL when the turn ends, so put your actual \
-answer there and do NOT repeat it here — use this only for messages that must arrive earlier \
-or separately."""
+    """Send a complete message to a named channel — FAN-OUT ONLY. Use this to notify someone \
+on a DIFFERENT channel from the inbound one (e.g. cc the wife while replying to a friend). \
+You do NOT need this tool to reply to the sender of the current turn — that reply is produced \
+simply by writing it as your assistant content, and the runtime auto-delivers it to the INPUT \
+CHANNEL. This tool is for reaching *other* recipients in the same turn."""
 
     def __init__(self, cfg: Config, channel_manager: WebSocketChannelManager) -> None:
         super().__init__(cfg)
@@ -457,7 +461,7 @@ or separately."""
 
     class Params(BaseModel):
         channel: str = Field(
-            description="Target channel name (must be currently connected). May be the INPUT CHANNEL."
+            description="Target channel name (must be currently connected). Should differ from INPUT CHANNEL."
         )
         text: str = Field(description="Exact message text the recipient will see")
 
