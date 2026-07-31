@@ -24,6 +24,7 @@ from config import (
     IMAGE_MIME_EXT,
     IMAGES_DIR,
     LLM_IMAGE_MIMES,
+    OUTBOUND_IMAGES_MAX_TOTAL_BYTES,
     sniff_image_mime,
     to_decodable_image,
     logger,
@@ -115,6 +116,7 @@ def _resolve_attachments(names: list[str]) -> tuple[list[str], list[str]]:
     """
     markers: list[str] = []
     rejected: list[str] = []
+    budget = OUTBOUND_IMAGES_MAX_TOTAL_BYTES
     for raw in names[:MAX_OUTBOUND_ATTACHMENTS]:
         # tolerate the model echoing a whole "[IMAGE <file> <mime>]" marker instead of the filename
         m = _IMAGE_MARKER.match(raw.strip())
@@ -129,7 +131,7 @@ def _resolve_attachments(names: list[str]) -> tuple[list[str], list[str]]:
                 fname = matches[-1]
                 path = IMAGES_DIR / fname
         if not fname or not path.is_file():
-            rejected.append(raw)
+            rejected.append(f"{raw} (no such image — you may have invented the filename)")
             continue
         mime = mimetypes.guess_type(fname)[0] or ""
         if mime not in LLM_IMAGE_MIMES:
@@ -137,8 +139,15 @@ def _resolve_attachments(names: list[str]) -> tuple[list[str], list[str]]:
         # Guard for stragglers stored before conversion existed: the reviewer has to render this,
         # and an undecodable one would 400 the whole review.
         if mime not in LLM_IMAGE_MIMES:
-            rejected.append(raw)
+            rejected.append(f"{raw} (unsupported image format)")
             continue
+        size = path.stat().st_size
+        if size > budget:
+            # base64 inflates by 4/3, and the whole answer travels as ONE websocket frame: exceeding
+            # the negotiated limit kills the channel mid-delivery instead of just dropping a picture.
+            rejected.append(f"{raw} (too large: {size / 1e6:.1f} MB, over the per-message budget)")
+            continue
+        budget -= size
         markers.append(f"{IMAGE_MARKER_PREFIX}{fname} {mime}]")
     return markers, rejected
 
@@ -656,7 +665,7 @@ class AgentLoop:
                     review = Review(
                         is_correct=False,
                         to_be_fixed=[
-                            f"attachment(s) {att_rejected} do not exist — you invented that filename. "
+                            f"attachment(s) not sent: {'; '.join(att_rejected)}. "
                             + (
                                 f"Copy one of these EXACTLY into attachments: {avail}."
                                 if avail
