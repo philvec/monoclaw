@@ -12,6 +12,7 @@ dependencies = [
     "json-repair==0.58.7",
     "websockets==14.2",
     "numpy>=1.26",
+    "pillow>=11.0",
     "mcp>=1.0.0",
 ]
 

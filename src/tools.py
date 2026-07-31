@@ -2,7 +2,6 @@ import asyncio
 import json
 import mimetypes
 import re
-import shutil
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
@@ -11,7 +10,7 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from channels import WebSocketChannelManager
-from config import Config, IMAGE_MIME_EXT, IMAGES_DIR, logger, sniff_image_mime
+from config import Config, IMAGE_MIME_EXT, IMAGES_DIR, logger, sniff_image_mime, to_decodable_image
 from llm import LLMClient
 from mcp_client import note_mcp_result
 from memory_store import MemoryStore
@@ -222,10 +221,14 @@ class ViewImageTool(Tool["ViewImageTool.Params"]):
             return f"not a supported image: {params.path} (detected {mime or 'unknown'})"
         # Copy into IMAGES_DIR so the marker resolves for the rest of the conversation even if the
         # workspace file is later moved or overwritten.
+        try:
+            data, mime = to_decodable_image(target.read_bytes(), mime)
+        except Exception as exc:
+            return f"error: could not decode {params.path} ({type(exc).__name__})"
         IMAGES_DIR.mkdir(parents=True, exist_ok=True)
         stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
-        fname = f"{stamp}-{target.name}"
-        shutil.copyfile(target, IMAGES_DIR / fname)
+        fname = f"{stamp}-{target.stem}{IMAGE_MIME_EXT.get(mime) or '.img'}"
+        (IMAGES_DIR / fname).write_bytes(data)
         logger.info(f"🖼️ view_image: {params.path} → {fname}")
         # Marker must lead — agent._expand_markers only treats leading lines as image markers.
         return f"[IMAGE {fname} {mime}]\n(showing {params.path})"
@@ -253,6 +256,10 @@ class FetchImageTool(Tool["FetchImageTool.Params"]):
             if len(resp.content) > self._MAX_BYTES:
                 return f"error: image is {len(resp.content) / 1e6:.1f} MB (limit {self._MAX_BYTES / 1e6:.0f} MB)"
             data = resp.content
+        try:
+            data, mime = to_decodable_image(data, mime)  # e.g. webp → png; never store undecodable
+        except Exception as exc:
+            return f"error: could not decode {params.url} ({type(exc).__name__}) — try another URL"
         IMAGES_DIR.mkdir(parents=True, exist_ok=True)
         stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
         fname = f"{stamp}-fetched{IMAGE_MIME_EXT.get(mime) or '.img'}"

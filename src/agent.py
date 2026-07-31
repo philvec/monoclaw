@@ -23,7 +23,9 @@ from config import (
     IMAGE_HISTORY_TURNS,
     IMAGE_MIME_EXT,
     IMAGES_DIR,
+    LLM_IMAGE_MIMES,
     sniff_image_mime,
+    to_decodable_image,
     logger,
     MAX_STORED_MSG_CHARS,
     SYSERR,
@@ -62,12 +64,22 @@ def _persist_user_content(msg: InboundMessage) -> str:
         return msg.text
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     markers: list[str] = []
+    notes: list[str] = []
     for i, img in enumerate(msg.images):
-        fname = f"{msg.timestamp}-{i}{IMAGE_MIME_EXT.get(img.mime) or mimetypes.guess_extension(img.mime) or '.img'}"
-        (IMAGES_DIR / fname).write_bytes(base64.b64decode(img.data, validate=True))
-        markers.append(f"{IMAGE_MARKER_PREFIX}{fname} {img.mime}]")
+        raw = base64.b64decode(img.data, validate=True)
+        try:
+            # Convert here, not at read time: storing something the backend cannot decode would
+            # make every later turn fail, not just this one.
+            data, mime = to_decodable_image(raw, img.mime)
+        except Exception as exc:
+            logger.warning(f"undecodable inbound image from {msg.channel!r} ({img.mime}): {exc}")
+            notes.append(f"[obrazek {img.name or i} w nieobsługiwanym formacie ({img.mime}) — nie widzę go]")
+            continue
+        fname = f"{msg.timestamp}-{i}{IMAGE_MIME_EXT.get(mime) or '.img'}"
+        (IMAGES_DIR / fname).write_bytes(data)
+        markers.append(f"{IMAGE_MARKER_PREFIX}{fname} {mime}]")
     logger.info(f"🖼️ stored {len(markers)} image(s) from {msg.channel!r} in {IMAGES_DIR}")
-    return "\n".join(markers + ([msg.text] if msg.text else []))
+    return "\n".join(markers + notes + ([msg.text] if msg.text else []))
 
 
 def _expand_markers(content: str) -> list[ChatCompletionContentPartParam]:
@@ -110,9 +122,11 @@ def _resolve_attachments(names: list[str]) -> tuple[list[str], list[str]]:
             rejected.append(raw)
             continue
         mime = mimetypes.guess_type(fname)[0] or ""
-        if not mime.startswith("image/"):
+        if mime not in LLM_IMAGE_MIMES:
             mime = sniff_image_mime(path.read_bytes()[:16])
-        if not mime:
+        # Guard for stragglers stored before conversion existed: the reviewer has to render this,
+        # and an undecodable one would 400 the whole review.
+        if mime not in LLM_IMAGE_MIMES:
             rejected.append(raw)
             continue
         markers.append(f"{IMAGE_MARKER_PREFIX}{fname} {mime}]")

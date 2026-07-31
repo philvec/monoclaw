@@ -35,6 +35,30 @@ IMAGE_MIME_EXT = {
 }
 
 
+# What the LLM backend can actually decode: llama.cpp's mtmd uses stb_image (JPEG/PNG/GIF/BMP and
+# some exotica) and has no WebP support at all — verified in the deployed build. Anything else must
+# be converted BEFORE it is stored: an undecodable image in history makes llama-server 400 every
+# later turn until it rolls out of the window, i.e. one bad picture bricks the assistant.
+LLM_IMAGE_MIMES = {"image/jpeg", "image/png", "image/gif", "image/bmp"}
+
+
+def to_decodable_image(data: bytes, mime: str) -> tuple[bytes, str]:
+    """Return (data, mime) the LLM backend can read, converting if needed. Raises if impossible.
+
+    A large share of web images are WebP, so converting beats refusing them.
+    """
+    if mime in LLM_IMAGE_MIMES:
+        return data, mime
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as im:
+        buf = io.BytesIO()
+        im.convert("RGBA" if im.mode in ("RGBA", "LA", "P") else "RGB").save(buf, format="PNG")
+    return buf.getvalue(), "image/png"
+
+
 def sniff_image_mime(head: bytes) -> str:
     """Identify an image from its magic bytes. Filenames are not trustworthy: a stored file may have
     no extension, or one the local mimetypes db has no entry for (notably .webp)."""
