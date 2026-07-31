@@ -18,18 +18,13 @@ _MAX_REQUEST_CHARS = 2000  # group turns carry a whole transcript; keep the mark
 
 _REVIEW_PROMPT = (
     "REVIEW (internal, not delivered). Evaluate the preceding assistant message: "
-    "(1) Is the message non-empty and an actual answer to what was asked? What is being answered is "
-    "the '[CURRENT REQUEST]' block below — judge against that one. "
-    "The conversation above it is context, and you need it: it is what makes the current request "
-    "intelligible (a request like 'send me the one with two' only means anything through it), it is "
-    "where you verify tool calls and results, and it holds facts and earlier answers the reply may "
-    "legitimately build on. Read it and use it for all of that. "
-    "The one thing it is NOT is a menu of other requests to answer: the asks in it have already been "
-    "handled. So never reject a response for failing to match what was asked 'originally' or in an "
-    "earlier turn, and never tell the assistant to send a result that belongs to one of those. "
-    "Every turn must deliver a reply — there is no silent option. An empty message, or one that "
-    "answers a different question than the [CURRENT REQUEST], is is_correct=False. Admitting "
-    "inability ('I could not find X', 'that tool failed') IS a valid answer when it is what happened. "
+    "(1) Is the message non-empty and an actual answer to what was asked? The conversation above is "
+    "context; the thing to answer is the '[CURRENT REQUEST]' block below. Earlier requests in the "
+    "history are already handled — never reject a reply for not matching an older one, and never ask "
+    "for an older result to be resent. Every turn must deliver a reply — there is no silent option. "
+    "An empty message, or one answering a different question than the [CURRENT REQUEST], is "
+    "is_correct=False. Admitting inability ('I could not find X', 'that tool failed') IS a valid "
+    "answer when it is what happened. "
     "(2) Does the justification cite a specific, named source — exact tool result, memory entry, "
     "quoted past message, named channel rule, or system prompt / MASTER.md content — that verifiably "
     "supports EVERY claim in the message? "
@@ -158,9 +153,8 @@ class Reviewer:
         review_msgs.append(
             ChatCompletionUserMessageParam(
                 role="user",
-                content=f"[CURRENT REQUEST — judge the response below against THIS. The conversation "
-                f"above is background: use it to understand what this refers to and to verify tool "
-                f"calls, but it is not an alternative request to answer]\n{ask}\n\n"
+                content=f"[CURRENT REQUEST — history above is context; this is what the response "
+                f"must answer]\n{ask}\n\n"
                 f"[ASSISTANT JUSTIFICATION]\n{justification or '(none provided)'}\n\n"
                 f"[ASSISTANT RESPONSE TO REVIEW]\n{assistant_content}",
             )
