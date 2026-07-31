@@ -193,8 +193,10 @@ class ReadFileTool(Tool["ReadFileTool.Params"]):
 
 
 class ViewImageTool(Tool["ViewImageTool.Params"]):
-    """Look at an image file inside the workspace. The picture itself is added to your context,
-    so you can describe or answer questions about what it shows."""
+    """Show an image file that is already in the workspace — e.g. one a script just generated.
+    The picture is added to your context so you can check what it shows, AND the filename it returns
+    goes into Answer.attachments to send that file to the user. THIS is the tool for showing a local
+    file; fetch_image is only for downloading from an http(s) URL."""
 
     # mtmd decodes via stb_image; IMAGE_MIME_EXT is the single source of truth for what we handle.
     _MIMES = set(IMAGE_MIME_EXT)
@@ -231,13 +233,17 @@ class ViewImageTool(Tool["ViewImageTool.Params"]):
         (IMAGES_DIR / fname).write_bytes(data)
         logger.info(f"🖼️ view_image: {params.path} → {fname}")
         # Marker must lead — agent._expand_markers only treats leading lines as image markers.
-        return f"[IMAGE {fname} {mime}]\n(showing {params.path})"
+        return (
+            f"[IMAGE {fname} {mime}]\n(showing {params.path})\n"
+            f'To send this file to the user, set attachments to ["{fname}"] — exactly that string.'
+        )
 
 
 class FetchImageTool(Tool["FetchImageTool.Params"]):
-    """Download an image from a URL and look at it. The picture is added to your context, so you can
-    check what it actually shows before deciding to send it. Use the returned filename in
-    Answer.attachments to deliver it to the user."""
+    """Download an image from an http(s) URL on the web and look at it. The picture is added to your
+    context, so you can check what it actually shows before deciding to send it; the returned filename
+    goes in Answer.attachments to deliver it to the user. Web URLs ONLY — for a file that is already
+    in the workspace (e.g. one you just generated), use view_image instead."""
 
     _MAX_BYTES = 8_000_000
 
@@ -246,7 +252,12 @@ class FetchImageTool(Tool["FetchImageTool.Params"]):
 
     async def execute(self, params: Params) -> str:  # type: ignore[override]
         if not params.url.lower().startswith(("http://", "https://")):
-            return f"error: not an http(s) url: {params.url!r}"
+            # Observed: the model reaches here with file:///workspace/x.png or a localhost URL when it
+            # wants to show a file it just made. Name the right tool instead of just refusing.
+            return (
+                f"error: not an http(s) url: {params.url!r}. fetch_image only downloads from the web — "
+                "to show a file that is already in the workspace, call view_image with its relative path."
+            )
         async with httpx.AsyncClient(follow_redirects=True, max_redirects=5) as client:
             resp = await client.get(params.url, timeout=20.0, headers={"User-Agent": "monoclaw/1.0"})
             resp.raise_for_status()
@@ -357,7 +368,9 @@ class GrepTool(Tool["GrepTool.Params"]):
 
 
 class ShellTool(Tool["ShellTool.Params"]):
-    """Execute a shell command. Working directory is the workspace."""
+    """Run a shell command; the working directory is the workspace. This is how you EXECUTE things —
+    after write_file, run the script here (e.g. `python draw.py`) rather than searching the web for
+    how to run it. Also use it to check what is installed (`python -c "import PIL"`)."""
 
     _DENY_PATTERNS: list[re.Pattern[str]] = [
         re.compile(p, re.IGNORECASE)
