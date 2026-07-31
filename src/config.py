@@ -20,6 +20,12 @@ WS_HOST = "0.0.0.0"
 WS_PORT = 8765
 MAX_STORED_MSG_CHARS = 8000
 ARCHIVE_DIR = Path("./data/archive")
+# Inbound images are written here and referenced from history by an "[IMAGE <file> <mime>]" marker;
+# history itself stays str-only (see agent._persist_user_content). Deliberately outside
+# ./data/workspace so the shell/write_file tools cannot reach them.
+IMAGES_DIR = Path("./data/images")
+IMAGE_HISTORY_TURNS = 2  # newest marker messages expanded into the prompt; older stay marker text
+WS_MAX_FRAME_BYTES = 16 * 1024 * 1024  # base64 images exceed the websockets default (1 MB)
 
 
 class LLMConfig(BaseModel):

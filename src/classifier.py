@@ -164,7 +164,11 @@ class FastClassifier:
 
     async def process(self, msg: InboundMessage) -> Decision:
         """Classify one inbound message and decide routing. Never raises."""
-        if not self.enabled or not msg.text or msg.channel == CRON_CHANNEL:
+        if not self.enabled or not msg.text or msg.images or msg.channel == CRON_CHANNEL:
+            if msg.images:
+                # the classifier model runs without an mmproj: shown a caption but not the picture it
+                # would answer confidently about an image it cannot see. Hand it to the agent instead.
+                logger.info(f"⚡ image message on {msg.channel!r} — classifier has no vision, passthrough")
             return Decision(handled=False)
 
         try:

@@ -1,6 +1,8 @@
 import asyncio
 import json
+import mimetypes
 import re
+import shutil
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
@@ -8,7 +10,7 @@ from typing import Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, Field, ValidationError
 
 from channels import WebSocketChannelManager
-from config import Config, logger
+from config import Config, IMAGES_DIR, logger
 from llm import LLMClient
 from mcp_client import note_mcp_result
 from memory_store import MemoryStore
@@ -86,6 +88,7 @@ class ToolRegistry:
         registry = cls()
         tools: list[Tool[Any]] = [
             ReadFileTool(cfg),
+            ViewImageTool(cfg),
             WriteFileTool(cfg),
             EditFileTool(cfg),
             GlobTool(cfg),
@@ -186,6 +189,34 @@ class ReadFileTool(Tool["ReadFileTool.Params"]):
         start = max(0, params.offset - 1)
         chunk = lines[start : start + params.limit]
         return "\n".join(f"{start + i + 1}\t{line}" for i, line in enumerate(chunk))
+
+
+class ViewImageTool(Tool["ViewImageTool.Params"]):
+    """Look at an image file inside the workspace. The picture itself is added to your context,
+    so you can describe or answer questions about what it shows."""
+
+    # mtmd decodes via stb_image; keep the advertised set to what it actually handles.
+    _MIMES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
+
+    class Params(BaseModel):
+        path: str = Field(description="Relative path to an image file (jpg, png, webp, gif, bmp)")
+
+    async def execute(self, params: Params) -> str:  # type: ignore[override]
+        target = _safe_path(params.path)
+        if not target.is_file():
+            return f"image not found: {params.path}"
+        mime = mimetypes.guess_type(target.name)[0] or ""
+        if mime not in self._MIMES:
+            return f"not a supported image: {params.path} (detected {mime or 'unknown'})"
+        # Copy into IMAGES_DIR so the marker resolves for the rest of the conversation even if the
+        # workspace file is later moved or overwritten.
+        IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+        fname = f"{stamp}-{target.name}"
+        shutil.copyfile(target, IMAGES_DIR / fname)
+        logger.info(f"🖼️ view_image: {params.path} → {fname}")
+        # Marker must lead — agent._expand_markers only treats leading lines as image markers.
+        return f"[IMAGE {fname} {mime}]\n(showing {params.path})"
 
 
 class WriteFileTool(Tool["WriteFileTool.Params"]):

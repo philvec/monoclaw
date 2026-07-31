@@ -1,6 +1,9 @@
 import asyncio
+import base64
 import json
+import mimetypes
 import random
+import re
 from datetime import datetime, timezone
 
 from pathlib import Path
@@ -14,9 +17,20 @@ from models import Answer, Review
 from reviewer import Reviewer, MAX_NEGATIVE_REVIEWS
 from scheduler import CronJob
 from channels import WebSocketChannelManager, InboundMessage
-from config import ARCHIVE_DIR, CRON_CHANNEL, logger, MAX_STORED_MSG_CHARS, SYSERR
+from config import (
+    ARCHIVE_DIR,
+    CRON_CHANNEL,
+    IMAGE_HISTORY_TURNS,
+    IMAGES_DIR,
+    logger,
+    MAX_STORED_MSG_CHARS,
+    SYSERR,
+)
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
+    ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartParam,
+    ChatCompletionContentPartTextParam,
     ChatCompletionMessageParam,
     ChatCompletionSystemMessageParam,
     ChatCompletionToolMessageParam,
@@ -28,6 +42,83 @@ from tools import ToolRegistry
 _MAX_TOOL_ITERATIONS = 20
 _MAX_EXTRACT_CANCELS = 8  # force extraction after this many consecutive deferrals
 _CHECKPOINT_PATH = Path("./data/history.jsonl")
+
+# Images never enter session history: _process_inner assigns history straight from the prompt list
+# (see "Persist turn to session history" below), so content parts placed in `messages` would be
+# written back to history and onto disk. History therefore stays str-only and carries markers;
+# _with_images expands them into content parts at the llm.chat() boundary only, on a copy.
+IMAGE_MARKER_PREFIX = "[IMAGE "
+_IMAGE_MARKER = re.compile(r"^\[IMAGE ([^\s\]]+) (image/[^\s\]]+)\]$")
+
+
+def _persist_user_content(msg: InboundMessage) -> str:
+    """Write inbound images to IMAGES_DIR; return the content stored in history: one
+    '[IMAGE <file> <mime>]' marker per image, then the user's text. Text-only messages
+    are returned verbatim. Raises on undecodable base64 or an unwritable directory."""
+    if not msg.images:
+        return msg.text
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    markers: list[str] = []
+    for i, img in enumerate(msg.images):
+        fname = f"{msg.timestamp}-{i}{mimetypes.guess_extension(img.mime) or '.bin'}"
+        (IMAGES_DIR / fname).write_bytes(base64.b64decode(img.data, validate=True))
+        markers.append(f"{IMAGE_MARKER_PREFIX}{fname} {img.mime}]")
+    logger.info(f"🖼️ stored {len(markers)} image(s) from {msg.channel!r} in {IMAGES_DIR}")
+    return "\n".join(markers + ([msg.text] if msg.text else []))
+
+
+def _expand_markers(content: str) -> list[ChatCompletionContentPartParam]:
+    """Leading '[IMAGE ...]' marker lines → image parts; the remaining text → one text part."""
+    parts: list[ChatCompletionContentPartParam] = []
+    rest: list[str] = []
+    for line in content.split("\n"):
+        if rest or not (m := _IMAGE_MARKER.match(line)):
+            rest.append(line)
+            continue
+        # basename only: marker text is attacker-reachable (a user can type one, and the agent can
+        # write one via its file tools), so never let it escape IMAGES_DIR — cf. tools._safe_path.
+        data = (IMAGES_DIR / Path(m.group(1)).name).read_bytes()
+        parts.append(
+            ChatCompletionContentPartImageParam(
+                type="image_url",
+                image_url={"url": f"data:{m.group(2)};base64,{base64.b64encode(data).decode('ascii')}"},
+            )
+        )
+    if text := "\n".join(rest).strip():
+        parts.append(ChatCompletionContentPartTextParam(type="text", text=text))
+    return parts
+
+
+def _with_images(messages: list[ChatCompletionMessageParam]) -> list[ChatCompletionMessageParam]:
+    """Prompt-time only: expand the newest IMAGE_HISTORY_TURNS marker-bearing messages into content
+    parts. Returns a NEW list — `messages` and session history must stay str-only.
+
+    Tool results are expanded too: the Qwen chat template renders a tool message inside a user block,
+    so images are legal there, which is how view_image gets its picture into the context.
+    """
+    idxs = [
+        i
+        for i, m in enumerate(messages)
+        if m.get("role") in ("user", "tool")
+        and isinstance(c := m.get("content"), str)
+        and c.startswith(IMAGE_MARKER_PREFIX)
+    ]
+    out = list(messages)
+    expanded = 0
+    for i in reversed(idxs):
+        if expanded >= IMAGE_HISTORY_TURNS:
+            break
+        try:
+            parts = _expand_markers(str(messages[i]["content"]))
+            out[i] = {**messages[i], "content": parts}  # type: ignore[typeddict-item]
+        except OSError as exc:
+            # The marker is permanent history; a pruned or lost file must not brick every later turn.
+            # The model still sees the marker line, so nothing is silently fabricated.
+            logger.warning(f"image file missing for history[{i}], sending marker text only: {exc}")
+            continue
+        expanded += 1
+    return out
+
 
 _MAX_REVIEWS_FALLBACK_MESSAGES = [
     "Sorry, I couldn't produce a coherent response for this one. 🤷",
@@ -44,7 +135,8 @@ _SCHEMA_INSTRUCTIONS = (
     "Must explicitly justify BOTH the stay_silent decision AND every factual claim put in the message. "
     "For each claim, cite the exact source: system prompt / MASTER.md rule (e.g. 'system prompt states X'), "
     "named tool result (e.g. 'memory_search returned empty'), "
-    "named memory entry (e.g. 'memory user-prefers-polish'), quoted past message, or exact channel rule. "
+    "named memory entry (e.g. 'memory user-prefers-polish'), quoted past message, exact channel rule, "
+    "or an image you were shown (a '[IMAGE ...]' message; cite as 'attached image shows X'). "
     "For stay_silent=True: quote the specific rule or exact user instruction that permits silence — "
     "e.g. 'channel rule: group channels default to silent' or 'user said \"nie odpisuj\" in message at T'. "
     "For any admission of inability (e.g. 'I don't have that data', 'I found nothing'): cite the tool "
@@ -187,7 +279,7 @@ class AgentLoop:
         if msg.channel != CRON_CHANNEL:
             await self._channel_manager.send_full_msg(msg.channel, output)
         async with self._session.lock:
-            user_msg = ChatCompletionUserMessageParam(role="user", content=msg.text)
+            user_msg = ChatCompletionUserMessageParam(role="user", content=_persist_user_content(msg))
             assistant_msg = ChatCompletionAssistantMessageParam(role="assistant", content=output)
             self._session.history.append(user_msg)
             self._session.history.append(assistant_msg)
@@ -244,7 +336,9 @@ class AgentLoop:
         if preamble:
             messages.append(ChatCompletionUserMessageParam(role="user", content=preamble))
 
-        user_msg = ChatCompletionUserMessageParam(role="user", content=msg.text)
+        # Images are written to disk here and referenced by marker; raises before any history is
+        # touched, so a failed write leaves no partial state.
+        user_msg = ChatCompletionUserMessageParam(role="user", content=_persist_user_content(msg))
         messages.append(user_msg)
 
         # Archive inbound message immediately so it survives any mid-turn failure
@@ -265,7 +359,7 @@ class AgentLoop:
 
             # Phase 1: tool-capable call (no response_model/response_format — lets model call tools freely)
             logger.info(f"🤖 LLM call start (iter={iterations}, msgs={len(messages)})")
-            response = await self._llm.chat(messages, tools=self._tool_registry.definitions)
+            response = await self._llm.chat(_with_images(messages), tools=self._tool_registry.definitions)
             self._ctx.update(response)
 
             if response.finish_reason != "error":
@@ -359,7 +453,7 @@ class AgentLoop:
                     ),
                 )
             )
-            struct_resp = await self._llm.chat(struct_msgs, response_model=Answer)
+            struct_resp = await self._llm.chat(_with_images(struct_msgs), response_model=Answer)
             initial_answer: Answer | None = struct_resp.parsed if isinstance(struct_resp.parsed, Answer) else None
             if initial_answer is not None:
                 raw_preview = initial_answer.message[:200] + ("…" if len(initial_answer.message) > 200 else "")
@@ -608,7 +702,8 @@ class AgentLoop:
                 ChatCompletionUserMessageParam(role="user", content="."),
             ]
             logger.info(f"🔥 warming agent cache ({len(messages)} msgs)")
-            await self._llm.chat(messages, tools=self._tool_registry.definitions, max_tokens=1)
+            # must expand images too, or the warmed prefix diverges from the real turn's
+            await self._llm.chat(_with_images(messages), tools=self._tool_registry.definitions, max_tokens=1)
             logger.info("✅ agent cache warmed")
         except Exception as exc:
             logger.error(f"agent cache warm-up failed: {exc}")

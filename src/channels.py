@@ -6,15 +6,22 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 import websockets
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-from config import CRON_CHANNEL, WS_HOST, WS_PORT, logger
+from config import CRON_CHANNEL, WS_HOST, WS_MAX_FRAME_BYTES, WS_PORT, logger
+
+
+class InboundImage(BaseModel):
+    mime: str
+    data: str  # base64 payload, without the "data:<mime>;base64," prefix
+    name: str = ""
 
 
 class InboundMessage(BaseModel):
     channel: str
     text: str
     timestamp: int
+    images: list[InboundImage] = []
 
 
 class WebSocketChannelManager:
@@ -23,7 +30,8 @@ class WebSocketChannelManager:
 
     Protocol:
       - Client connects and sends a handshake with its name: {"name": "signal/bob"}
-      - Client sends messages: {"text": "..."}
+      - Client sends messages: {"text": "..."} with optional
+        "images": [{"mime": "image/jpeg", "data": "<base64>", "name": "photo.jpg"}]
       - Server sends replies as two frames: {"chunk": "..."} then {"end": true}
     """
 
@@ -36,7 +44,7 @@ class WebSocketChannelManager:
     async def start(self, on_message: Callable[[InboundMessage], Coroutine[Any, Any, None]]) -> None:
         self._on_message = on_message
         logger.info(f"websocket server listening on {WS_HOST}:{WS_PORT}")
-        async with websockets.serve(self._handle, WS_HOST, WS_PORT):
+        async with websockets.serve(self._handle, WS_HOST, WS_PORT, max_size=WS_MAX_FRAME_BYTES):
             await asyncio.Future()
 
     @property
@@ -98,12 +106,20 @@ class WebSocketChannelManager:
                     await ws.send(json.dumps({"error": f"invalid JSON: {exc}"}))
                     continue
                 text: str = data.get("text", "")
-                msg = InboundMessage(
-                    channel=name,
-                    text=text.strip(),
-                    timestamp=int(time.time() * 1000),
-                )
-                logger.info(f"📨 message from {name!r}: {text[:60]!r}")
+                try:
+                    msg = InboundMessage(
+                        channel=name,
+                        text=text.strip(),
+                        timestamp=int(time.time() * 1000),
+                        images=data.get("images") or [],
+                    )
+                except ValidationError as exc:
+                    logger.warning(f"invalid message from {name!r}: {exc}")
+                    await ws.send(json.dumps({"error": f"invalid message: {exc}"}))
+                    continue
+                # never log msg.images — base64 payloads would flood the log
+                img_note = f" +{len(msg.images)} image(s)" if msg.images else ""
+                logger.info(f"📨 message from {name!r}: {text[:60]!r}{img_note}")
                 asyncio.create_task(self._on_message(msg))
         finally:
             self._connections.pop(name, None)

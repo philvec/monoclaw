@@ -40,6 +40,11 @@ A bridge connects to monoclaw via WebSocket on port `8765`.
 {"text": "Hello!"}
 ```
 
+Optionally with images — the model is multimodal. `images` may be omitted entirely, so text-only bridges are unaffected. `data` is raw base64 with no `data:` URI prefix:
+```json
+{"text": "co to jest?", "images": [{"mime": "image/jpeg", "data": "<base64>", "name": "photo.jpg"}]}
+```
+
 **Outbound message** (monoclaw → bridge) — a reply arrives as one or more `chunk` frames (streamed token-by-token during auto-delivery, or a single chunk for fan-out) terminated by an `end` frame. A single turn may produce multiple such messages (e.g. mid-turn narration before a tool call, then a final answer):
 ```json
 {"chunk": "He"}

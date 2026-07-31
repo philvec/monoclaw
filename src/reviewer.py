@@ -59,6 +59,10 @@ _REVIEW_PROMPT = (
     "cites a specific new tool result obtained AFTER the rejection that explicitly permits silence "
     "(e.g. a channel rule discovered via tool call). A vague or unchanged silence justification "
     "after a rejection always fails this check. "
+    "(8) Attached images: a user or tool message beginning with '[IMAGE <file> <mime>]' means the agent "
+    "was shown that image directly. Its visual content is a valid, complete source, and no tool call is "
+    "required to describe it — 'the attached image shows ...' is an acceptable citation. You do NOT see "
+    "the image yourself; never mark is_correct=False merely because you cannot visually verify such a claim. "
     "Return ONLY a JSON object — no prose, no markdown, no explanation:\n"
     '{"is_correct": true, "to_be_fixed": []}\n'
     "Each entry in to_be_fixed must be a concrete, actionable problem."
