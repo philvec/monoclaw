@@ -286,7 +286,8 @@ class FetchImageTool(Tool["FetchImageTool.Params"]):
 
 
 class WriteFileTool(Tool["WriteFileTool.Params"]):
-    """Write content to a file inside the workspace, creating it if needed."""
+    """Write content to a file inside the workspace, creating it if needed. To RUN what you wrote,
+    call shell — never write a second script whose job is to run the first one."""
 
     class Params(BaseModel):
         path: str = Field(description="Relative path to file")
@@ -296,7 +297,12 @@ class WriteFileTool(Tool["WriteFileTool.Params"]):
         target = _safe_path(params.path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(params.content)
-        return f"wrote {len(params.content)} chars to {params.path}"
+        out = f"wrote {len(params.content)} chars to {params.path}"
+        if target.suffix in (".py", ".sh"):
+            # It kept writing a subprocess-based "runner" instead of just executing the script.
+            runner = "python" if target.suffix == ".py" else "bash"
+            out += f'\nTo run it, call shell with `{runner} {params.path}` — do not write a runner script.'
+        return out
 
 
 class EditFileTool(Tool["EditFileTool.Params"]):

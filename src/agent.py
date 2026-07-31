@@ -44,6 +44,7 @@ from openai.types.chat.chat_completion_message_tool_call_param import ChatComple
 from tools import ToolRegistry
 
 _MAX_TOOL_ITERATIONS = 20
+_REPEATED_CALL_LIMIT = 2  # identical (name, args) executions per turn before the call is refused
 _MAX_EXTRACT_CANCELS = 8  # force extraction after this many consecutive deferrals
 _CHECKPOINT_PATH = Path("./data/history.jsonl")
 
@@ -451,6 +452,7 @@ class AgentLoop:
         review_rejections = 0
         review_start_idx = -1  # index in messages where first Answer was appended
         review_accepted = False
+        call_counts: dict[str, int] = {}  # identical tool calls this turn — see _REPEATED_CALL_LIMIT
 
         while iterations < _MAX_TOOL_ITERATIONS:
             iterations += 1
@@ -530,7 +532,22 @@ class AgentLoop:
                         return s if len(s) <= n else s[:n] + "..."
                     args_preview = "{" + ", ".join(f"{k}: {_trunc(v)}" for k, v in (tc.arguments or {}).items()) + "}"
                     logger.info(f"🔧 tool call: {tc.name!r} args={args_preview}")
-                    result = await self._tool_registry.execute(tc.name, tc.arguments)
+                    sig = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True, default=str)}"
+                    call_counts[sig] = call_counts.get(sig, 0) + 1
+                    if call_counts[sig] > _REPEATED_CALL_LIMIT:
+                        # Observed live: 13 consecutive identical write_file calls creating a Python
+                        # "runner" script, narrating "I'll run it" each time and never calling shell.
+                        # Repeating a call that already succeeded cannot make progress — say so.
+                        logger.warning(f"🔁 blocked repeat #{call_counts[sig]} of {tc.name!r} — same arguments")
+                        result = (
+                            f"error: you already called {tc.name} with these exact arguments "
+                            f"{call_counts[sig] - 1} time(s) this turn and it did not move you forward. "
+                            "Repeating it will not help. Do something DIFFERENT: if you need to run a "
+                            "script, call shell (e.g. `python draw_square.py`) — do not write another "
+                            "script to run it. If the work is already done, stop calling tools and answer."
+                        )
+                    else:
+                        result = await self._tool_registry.execute(tc.name, tc.arguments)
                     messages.append(ChatCompletionToolMessageParam(role="tool", tool_call_id=tc.id, content=result))
                 continue
 
