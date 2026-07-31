@@ -266,7 +266,12 @@ class FetchImageTool(Tool["FetchImageTool.Params"]):
         (IMAGES_DIR / fname).write_bytes(data)
         logger.info(f"🖼️ fetch_image: {params.url} → {fname} ({len(data) / 1e3:.0f} kB)")
         # Marker must lead — agent._expand_markers only treats leading lines as image markers.
-        return f"[IMAGE {fname} {mime}]\n(fetched from {params.url})"
+        # The exact attachments value is spelled out because the model otherwise invents a
+        # descriptive filename ("wawel-castle-krakow.jpg") instead of copying this opaque one.
+        return (
+            f"[IMAGE {fname} {mime}]\n(fetched from {params.url})\n"
+            f'To send this picture, set attachments to ["{fname}"] — exactly that string, do not rename it.'
+        )
 
 
 class WriteFileTool(Tool["WriteFileTool.Params"]):

@@ -133,6 +133,21 @@ def _resolve_attachments(names: list[str]) -> tuple[list[str], list[str]]:
     return markers, rejected
 
 
+def _available_attachments(messages: list[ChatCompletionMessageParam]) -> list[str]:
+    """Marker filenames present in this turn — the only names that may legitimately be attached.
+    Used to make a rejection actionable: the model reliably invents a descriptive filename
+    ('wawel-castle-krakow.jpg') instead of copying the opaque stored one, so tell it the real ones."""
+    seen: list[str] = []
+    for m in messages:
+        content = m.get("content")
+        if not isinstance(content, str):
+            continue
+        for line in content.split("\n"):
+            if (mm := _IMAGE_MARKER.match(line)) and mm.group(1) not in seen:
+                seen.append(mm.group(1))
+    return seen
+
+
 def _load_attachments(markers: list[str]) -> list[dict]:
     """Marker lines → wire payloads for the outbound frame."""
     out: list[dict] = []
@@ -584,12 +599,17 @@ class AgentLoop:
                     attachment_parts=_expand_markers("\n".join(att_markers)) if att_markers else None,
                 )
                 if review.is_correct and att_rejected:
+                    avail = _available_attachments(messages)
                     review = Review(
                         is_correct=False,
                         to_be_fixed=[
-                            f"attachment(s) {att_rejected} do not exist — attach only a filename you were "
-                            "shown in an '[IMAGE <file> <mime>]' marker this conversation, or use "
-                            "fetch_image first."
+                            f"attachment(s) {att_rejected} do not exist — you invented that filename. "
+                            + (
+                                f"Copy one of these EXACTLY into attachments: {avail}."
+                                if avail
+                                else "No image has been fetched this turn — call fetch_image first, then "
+                                "copy the filename from the '[IMAGE <file> <mime>]' marker it returns."
+                            )
                         ],
                     )
 
