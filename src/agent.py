@@ -226,7 +226,7 @@ _MAX_REVIEWS_FALLBACK_MESSAGES = [
 _SCHEMA_INSTRUCTIONS = (
     "RESPONSE SCHEMA RULES:\n"
     "- justification: internal reasoning only, never shown to the user. "
-    "Must explicitly justify BOTH the stay_silent decision AND every factual claim put in the message. "
+    "Must explicitly justify every factual claim put in the message. "
     "For each claim, cite the exact source: system prompt / MASTER.md rule (e.g. 'system prompt states X'), "
     "named tool result (e.g. 'memory_search returned empty'), "
     "named memory entry (e.g. 'memory user-prefers-polish'), quoted past message, exact channel rule, "
@@ -242,8 +242,6 @@ _SCHEMA_INSTRUCTIONS = (
     "does NOT send a picture and does not satisfy the request. Never use send_message or send_email to "
     "deliver a reply to the person you are already talking to — your `message` is auto-delivered to the "
     "INPUT CHANNEL, and `attachments` rides along with it. "
-    "For stay_silent=True: quote the specific rule or exact user instruction that permits silence — "
-    "e.g. 'channel rule: group channels default to silent' or 'user said \"nie odpisuj\" in message at T'. "
     "For any admission of inability (e.g. 'I don't have that data', 'I found nothing'): cite the tool "
     "you ran and what it returned, AND the rule that directs you to inform the user of this. "
     "Vague justifications ('seemed appropriate', 'no relevant info') will fail review.\n"
@@ -255,16 +253,17 @@ _SCHEMA_INSTRUCTIONS = (
     "('Szukam w sieci…', 'zaraz sprawdzę', 'a potem napiszę skrypt'). If an action is still needed, call the "
     "tool FIRST and answer with its result — a message that narrates an action you did not perform this turn "
     "is a fabrication and will be rejected. "
-    "If stay_silent=False, message MUST be non-empty — an empty message with stay_silent=False is invalid.\n"
-    "- stay_silent: True to stay silent (internal work only); False to deliver message.\n"
+    "message MUST NEVER be empty. Every turn gets an answer — there is no way to stay silent. If you could "
+    "not do or find what was asked, say exactly that; if you have only a partial result, deliver it. An "
+    "empty message is always a bug, never a choice.\n"
     "INTERIM LINE — REQUIRED BEFORE EVERY TOOL CALL: before you use any tool, say what you are about to "
     "do in exactly ONE short line of plain text (e.g. 'Szukam w sieci…', 'Piszę skrypt do policzenia "
     "tego…'). The user sees it straight away. Applies to EVERY tool — searches, file writes, shell "
     "commands, memory reads alike. Exactly one line, never two, never the final answer — every time you "
     "reach for a tool, not just the slow ones. Do NOT use send_message for this; it is fan-out only and "
     "is refused for the input channel.\n"
-    "Every response is reviewed. The reviewer verifies that every claim in the message and the "
-    "stay_silent decision are each traceable to a specific cited source in the justification.\n"
+    "Every response is reviewed. The reviewer verifies that every claim in the message is traceable to a "
+    "specific cited source in the justification.\n"
     "TOOL POLICY: For questions about specific named entities (people, places, organisations, events), "
     "current facts (prices, schedules, availability, rankings), or any knowledge not confirmed by memory — "
     "if memory_search finds nothing relevant, call tools__web_search before answering. "
@@ -274,11 +273,7 @@ _SCHEMA_INSTRUCTIONS = (
     "Never state in your message that you edited, modified, updated, or wrote a file unless "
     "an edit_file or write_file tool result already exists in this turn's conversation. "
     "If the reviewer rejects your Answer for a missing tool call, your very next response "
-    "MUST call that tool — simply rewording the claim without calling the tool will be rejected again.\n"
-    "SILENCE AFTER REJECTION: If the reviewer previously rejected your response (you will see "
-    "[REVIEW — is_correct=False] in the conversation), you MUST NOT switch to stay_silent=True on "
-    "the retry. The user is waiting for a response — silence does not fix the rejection. "
-    "Fix the specific problems cited and deliver a non-silent answer."
+    "MUST call that tool — simply rewording the claim without calling the tool will be rejected again."
 )
 
 _CLASSIFIER_INSTRUCTIONS = (
@@ -596,7 +591,8 @@ class AgentLoop:
                     role="user",
                     content=(
                         "Produce your Answer as a JSON object: justification (str), message (str), "
-                        "stay_silent (bool), attachments (list[str], omit when empty). "
+                        "attachments (list[str], omit when empty). message must never be empty — every "
+                        "turn gets an answer. "
                         "IMPORTANT: if this task required a file edit or other tool action that has NOT yet been "
                         "performed in this turn, do NOT claim it in message — call the tool first. "
                         "If the user asked to be SENT a picture, put the filename from its "
@@ -609,7 +605,7 @@ class AgentLoop:
             initial_answer: Answer | None = struct_resp.parsed if isinstance(struct_resp.parsed, Answer) else None
             if initial_answer is not None:
                 raw_preview = initial_answer.message[:200] + ("…" if len(initial_answer.message) > 200 else "")
-                logger.info(f"🗒️ agent answer (pre-review): silent={initial_answer.stay_silent} msg={raw_preview!r}")
+                logger.info(f"🗒️ agent answer (pre-review): msg={raw_preview!r}")
 
             if initial_answer is None:
                 logger.warning(f"parse failure on {msg.channel!r} (iter={iterations}), retrying")
@@ -619,18 +615,18 @@ class AgentLoop:
                     ChatCompletionUserMessageParam(
                         role="user",
                         content=f"[{SYSERR} — your response did not parse as a valid Answer. "
-                        "Retry with a valid JSON object: justification (str), message (str), stay_silent (bool).]",
+                        "Retry with a valid JSON object: justification (str), message (str).]",
                     )
                 )
                 continue
 
-            initial_content = "[STAYED SILENT]" if initial_answer.stay_silent else initial_answer.message
+            initial_content = initial_answer.message
             if len(initial_content) > MAX_STORED_MSG_CHARS:
                 logger.warning(f"response truncated ({len(initial_content)} chars)")
                 initial_content = initial_content[:MAX_STORED_MSG_CHARS] + "… [truncated]"
             assistant_msg = ChatCompletionAssistantMessageParam(role="assistant", content=initial_content)
 
-            if not typing_signaled and not initial_answer.stay_silent:
+            if not typing_signaled:
                 try:
                     await self._channel_manager.send_chunk(msg.channel, "")
                     typing_signaled = True
@@ -638,11 +634,12 @@ class AgentLoop:
                     logger.warning(f"typing signal to {msg.channel!r} failed: {exc}")
 
             att_markers: list[str] = []
-            if not initial_answer.stay_silent and not initial_answer.message.strip():
+            if not initial_answer.message.strip():
                 review = Review(
                     is_correct=False,
                     to_be_fixed=[
-                        "stay_silent=False but message is empty — provide a non-empty message or set stay_silent=True."
+                        "message is empty. Every turn must deliver an answer — write one. If you could not "
+                        "do or find what was asked, say exactly that."
                     ],
                 )
             else:
@@ -683,25 +680,17 @@ class AgentLoop:
                 review_accepted = True
                 just_preview = initial_answer.justification[:200] + ("…" if len(initial_answer.justification) > 200 else "")
                 logger.info(f"✅ review passed (attempt {review_rejections + 1}) justification={just_preview!r}")
-                if not initial_answer.stay_silent and initial_answer.message.strip():
-                    preview = initial_answer.message[:120] + ("…" if len(initial_answer.message) > 120 else "")
-                    att_note = f" +{len(att_markers)} attachment(s)" if att_markers else ""
-                    logger.info(f"📤 delivering to {msg.channel!r}: {preview!r}{att_note}")
-                    try:
-                        await self._channel_manager.send_full_msg(
-                            msg.channel, initial_answer.message, _load_attachments(att_markers)
-                        )
-                        turn_delivered = True
-                    except Exception as exc:
-                        logger.warning(f"delivery to {msg.channel!r} skipped: {exc}")
-                else:
-                    logger.info(f"🤫 staying silent on {msg.channel!r}")
+                # An empty message is rejected before review, so an accepted answer always delivers.
+                preview = initial_answer.message[:120] + ("…" if len(initial_answer.message) > 120 else "")
+                att_note = f" +{len(att_markers)} attachment(s)" if att_markers else ""
+                logger.info(f"📤 delivering to {msg.channel!r}: {preview!r}{att_note}")
+                try:
+                    await self._channel_manager.send_full_msg(
+                        msg.channel, initial_answer.message, _load_attachments(att_markers)
+                    )
                     turn_delivered = True
-                    if typing_signaled:
-                        try:
-                            await self._channel_manager.end_msg(msg.channel)
-                        except Exception as exc:
-                            logger.warning(f"end signal to {msg.channel!r} skipped: {exc}")
+                except Exception as exc:
+                    logger.warning(f"delivery to {msg.channel!r} skipped: {exc}")
                 break
 
             review_rejections += 1
@@ -720,10 +709,8 @@ class AgentLoop:
                 )
             reviewer_content += (
                 "\nRetry. " + tool_clause + "Address exactly what the rejection listed; do not redo work that "
-                "already succeeded. All three fields required: justification (str), message (str), stay_silent (bool). "
-                "If stay_silent=False, message MUST be non-empty. "
-                "Do NOT switch to stay_silent=True to escape the rejection — the user is waiting for a response. "
-                "Fix the specific problem and deliver a non-silent answer."
+                "already succeeded. Both fields required: justification (str), message (str), and message MUST be "
+                "non-empty — the user is waiting for a response. Fix the specific problem and answer."
             )
             logger.info(f"❌ review rejected (attempt {review_rejections}/{MAX_NEGATIVE_REVIEWS}): {review.to_be_fixed}")
             messages.append(ChatCompletionUserMessageParam(role="user", content=reviewer_content))
