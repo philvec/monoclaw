@@ -592,8 +592,9 @@ class AgentLoop:
                     role="user",
                     content=(
                         f"The request you must answer NOW is: {_request_preview(msg.text)}\n"
-                        "Anything asked earlier in this conversation is already done and superseded — "
-                        "do not answer it again or resend its result.\n"
+                        "Use the conversation above to understand it — what it refers back to, what you "
+                        "already found out, what you just did. But the earlier requests in it are "
+                        "already answered: do not answer one of those again or resend its result.\n"
                         "Produce your Answer as a JSON object: justification (str), message (str), "
                         "attachments (list[str], omit when empty). message must never be empty — every "
                         "turn gets an answer. "
