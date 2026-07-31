@@ -137,6 +137,10 @@ _SCHEMA_INSTRUCTIONS = (
     "named tool result (e.g. 'memory_search returned empty'), "
     "named memory entry (e.g. 'memory user-prefers-polish'), quoted past message, exact channel rule, "
     "or an image you were shown (a '[IMAGE ...]' message; cite as 'attached image shows X'). "
+    "A message starting with '[IMAGE <file> <mime>]' has that picture ATTACHED — you can already see it, "
+    "so describe it directly. Do NOT call view_image (or read_file/shell) on that filename: it is an "
+    "internal reference, not a workspace file, and looking it up will fail. view_image is only for image "
+    "files in the workspace that were NOT attached to a message. "
     "For stay_silent=True: quote the specific rule or exact user instruction that permits silence — "
     "e.g. 'channel rule: group channels default to silent' or 'user said \"nie odpisuj\" in message at T'. "
     "For any admission of inability (e.g. 'I don't have that data', 'I found nothing'): cite the tool "
@@ -493,7 +497,12 @@ class AgentLoop:
                     ],
                 )
             else:
-                review = await self._reviewer.run_review(messages, assistant_msg, initial_answer.justification)
+                # The reviewer sees the pictures too. Without them it cannot verify a description of
+                # an image, falls back on "the claimed tool call is missing", and rejects every
+                # correct image answer — which then drives the agent into a doomed view_image hunt.
+                review = await self._reviewer.run_review(
+                    _with_images(messages), assistant_msg, initial_answer.justification
+                )
 
             if review_start_idx < 0:
                 review_start_idx = len(messages)
@@ -722,7 +731,8 @@ class AgentLoop:
                 *self._session.history,
             ]
             logger.info(f"🔥 warming reviewer cache ({len(messages)} msgs)")
-            await self._reviewer.warm_cache(messages)
+            # must match run_review's expansion, or the warmed prefix diverges
+            await self._reviewer.warm_cache(_with_images(messages))
             logger.info("✅ reviewer cache warmed")
         except Exception as exc:
             logger.error(f"reviewer cache warm-up failed: {exc}")

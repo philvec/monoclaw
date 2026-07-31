@@ -204,7 +204,14 @@ class ViewImageTool(Tool["ViewImageTool.Params"]):
     async def execute(self, params: Params) -> str:  # type: ignore[override]
         target = _safe_path(params.path)
         if not target.is_file():
-            return f"image not found: {params.path}"
+            # A "[IMAGE <file> <mime>]" marker names a stored image, not a workspace file. The model
+            # does sometimes reference one anyway; resolve it instead of hard-failing.
+            stored = IMAGES_DIR / Path(params.path).name  # basename only — must not escape IMAGES_DIR
+            if not stored.is_file():
+                return f"image not found: {params.path}"
+            # Already stored, and already attached to the message it came from: re-showing it would
+            # duplicate the picture in context for no gain.
+            return f"[IMAGE {stored.name} {mimetypes.guess_type(stored.name)[0] or 'image/jpeg'}]"
         mime = mimetypes.guess_type(target.name)[0] or ""
         if mime not in self._MIMES:
             return f"not a supported image: {params.path} (detected {mime or 'unknown'})"
