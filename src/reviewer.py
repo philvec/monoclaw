@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from typing import Any
 
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
@@ -68,6 +69,13 @@ _REVIEW_PROMPT = (
     "reject a description merely because no tool was called. The '[IMAGE ...]' filename is an internal "
     "reference, NOT a file in the workspace: do not ask anyone to open it. Reject only if the description "
     "actually contradicts the picture you see. "
+    "(9) Outbound attachments: a '[CANDIDATE ATTACHMENTS]' message means the assistant is about to SEND "
+    "those pictures to the user — look at them. Mark is_correct=False if a picture does not actually show "
+    "what the user asked for (wrong subject, wrong place, a logo/collage/screenshot instead of the thing "
+    "itself, unreadable), or if the response describes it inaccurately; say in to_be_fixed what the picture "
+    "actually shows so the assistant can fetch a better one. Conversely, if the user asked to be SENT a "
+    "picture and the response promises one but no candidate attachment is present, that is also "
+    "is_correct=False. "
     "Return ONLY a JSON object — no prose, no markdown, no explanation:\n"
     '{"is_correct": true, "to_be_fixed": []}\n'
     "Each entry in to_be_fixed must be a concrete, actionable problem."
@@ -116,6 +124,7 @@ class Reviewer:
         messages: list[ChatCompletionMessageParam],
         assistant_msg: ChatCompletionAssistantMessageParam,
         justification: str = "",
+        attachment_parts: list[Any] | None = None,
     ) -> Review:
         review_msgs = self._build_review_prefix(messages)
         assistant_content = str(assistant_msg.get("content") or "")
@@ -129,6 +138,26 @@ class Reviewer:
                 f"[ASSISTANT RESPONSE TO REVIEW]\n{assistant_content}",
             )
         )
+        # Outbound pictures are injected explicitly rather than relied on from history: the reviewer
+        # must see exactly what is about to be sent, whatever the history window happens to hold.
+        if attachment_parts:
+            review_msgs.append(
+                ChatCompletionUserMessageParam(
+                    role="user",
+                    content=[
+                        {
+                            "type": "text",
+                            "text": (
+                                "[CANDIDATE ATTACHMENTS] The assistant wants to SEND the following "
+                                "image(s) to the user with the response above. They follow, in order. "
+                                "Look at them and judge whether they actually show what the user asked "
+                                "for and match what the response claims."
+                            ),
+                        },
+                        *attachment_parts,
+                    ],
+                )
+            )
         resp = await self._llm.chat(review_msgs, response_model=Review)
         if isinstance(resp.parsed, Review):
             return resp.parsed

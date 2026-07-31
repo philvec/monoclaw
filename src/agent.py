@@ -49,6 +49,7 @@ _CHECKPOINT_PATH = Path("./data/history.jsonl")
 # _with_images expands them into content parts at the llm.chat() boundary only, on a copy.
 IMAGE_MARKER_PREFIX = "[IMAGE "
 _IMAGE_MARKER = re.compile(r"^\[IMAGE ([^\s\]]+) (image/[^\s\]]+)\]$")
+MAX_OUTBOUND_ATTACHMENTS = 4
 
 
 def _persist_user_content(msg: InboundMessage) -> str:
@@ -87,6 +88,44 @@ def _expand_markers(content: str) -> list[ChatCompletionContentPartParam]:
     if text := "\n".join(rest).strip():
         parts.append(ChatCompletionContentPartTextParam(type="text", text=text))
     return parts
+
+
+def _resolve_attachments(names: list[str]) -> tuple[list[str], list[str]]:
+    """Answer.attachments → (marker lines, rejected names).
+
+    The model supplies these filenames, so treat them as untrusted: basename only (never escape
+    IMAGES_DIR) and the file must already exist there — i.e. it must be a picture the model was
+    actually shown this conversation, not one it invented.
+    """
+    markers: list[str] = []
+    rejected: list[str] = []
+    for raw in names[:MAX_OUTBOUND_ATTACHMENTS]:
+        # tolerate the model echoing a whole "[IMAGE <file> <mime>]" marker instead of the filename
+        m = _IMAGE_MARKER.match(raw.strip())
+        fname = Path(m.group(1) if m else raw.strip()).name
+        path = IMAGES_DIR / fname
+        mime = mimetypes.guess_type(fname)[0] or ""
+        if not fname or not path.is_file() or not mime.startswith("image/"):
+            rejected.append(raw)
+            continue
+        markers.append(f"{IMAGE_MARKER_PREFIX}{fname} {mime}]")
+    return markers, rejected
+
+
+def _load_attachments(markers: list[str]) -> list[dict]:
+    """Marker lines → wire payloads for the outbound frame."""
+    out: list[dict] = []
+    for line in markers:
+        m = _IMAGE_MARKER.match(line)
+        if m is None:
+            continue
+        data = (IMAGES_DIR / Path(m.group(1)).name).read_bytes()
+        out.append({
+            "mime": m.group(2),
+            "data": base64.b64encode(data).decode("ascii"),
+            "name": m.group(1),
+        })
+    return out
 
 
 def _with_images(messages: list[ChatCompletionMessageParam]) -> list[ChatCompletionMessageParam]:
@@ -489,6 +528,7 @@ class AgentLoop:
                 except Exception as exc:
                     logger.warning(f"typing signal to {msg.channel!r} failed: {exc}")
 
+            att_markers: list[str] = []
             if not initial_answer.stay_silent and not initial_answer.message.strip():
                 review = Review(
                     is_correct=False,
@@ -497,12 +537,29 @@ class AgentLoop:
                     ],
                 )
             else:
+                # Resolve outbound attachments before review so the reviewer judges exactly what
+                # would be sent. Names the model invented are dropped here and reported back to it.
+                att_markers, att_rejected = _resolve_attachments(initial_answer.attachments)
+                if att_rejected:
+                    logger.warning(f"dropped unknown attachment(s): {att_rejected}")
                 # The reviewer sees the pictures too. Without them it cannot verify a description of
                 # an image, falls back on "the claimed tool call is missing", and rejects every
                 # correct image answer — which then drives the agent into a doomed view_image hunt.
                 review = await self._reviewer.run_review(
-                    _with_images(messages), assistant_msg, initial_answer.justification
+                    _with_images(messages),
+                    assistant_msg,
+                    initial_answer.justification,
+                    attachment_parts=_expand_markers("\n".join(att_markers)) if att_markers else None,
                 )
+                if review.is_correct and att_rejected:
+                    review = Review(
+                        is_correct=False,
+                        to_be_fixed=[
+                            f"attachment(s) {att_rejected} do not exist — attach only a filename you were "
+                            "shown in an '[IMAGE <file> <mime>]' marker this conversation, or use "
+                            "fetch_image first."
+                        ],
+                    )
 
             if review_start_idx < 0:
                 review_start_idx = len(messages)
@@ -514,9 +571,12 @@ class AgentLoop:
                 logger.info(f"✅ review passed (attempt {review_rejections + 1}) justification={just_preview!r}")
                 if not initial_answer.stay_silent and initial_answer.message.strip():
                     preview = initial_answer.message[:120] + ("…" if len(initial_answer.message) > 120 else "")
-                    logger.info(f"📤 delivering to {msg.channel!r}: {preview!r}")
+                    att_note = f" +{len(att_markers)} attachment(s)" if att_markers else ""
+                    logger.info(f"📤 delivering to {msg.channel!r}: {preview!r}{att_note}")
                     try:
-                        await self._channel_manager.send_full_msg(msg.channel, initial_answer.message)
+                        await self._channel_manager.send_full_msg(
+                            msg.channel, initial_answer.message, _load_attachments(att_markers)
+                        )
                         turn_delivered = True
                     except Exception as exc:
                         logger.warning(f"delivery to {msg.channel!r} skipped: {exc}")

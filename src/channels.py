@@ -53,12 +53,19 @@ class WebSocketChannelManager:
 
     # Sending — all methods raise if the channel isn't connected or the send fails.
 
-    async def send_chunk(self, channel_name: str, text: str) -> None:
-        """Send a single chunk to a channel (no end frame). Use for streaming."""
+    async def send_chunk(self, channel_name: str, text: str, images: list[dict] | None = None) -> None:
+        """Send a single chunk to a channel (no end frame). Use for streaming.
+
+        `images` are delivered as attachments by the bridge. Omitted from the frame when empty, so
+        text-only traffic stays byte-identical to before.
+        """
         ws = self._connections.get(channel_name)
         if ws is None:
             raise RuntimeError(f"channel {channel_name!r} is not connected")
-        await ws.send(json.dumps({"chunk": text}))
+        frame: dict = {"chunk": text}
+        if images:
+            frame["images"] = images
+        await ws.send(json.dumps(frame))
 
     async def end_msg(self, channel_name: str) -> None:
         """Signal end-of-message to a channel."""
@@ -67,9 +74,9 @@ class WebSocketChannelManager:
             raise RuntimeError(f"channel {channel_name!r} is not connected")
         await ws.send(json.dumps({"end": True}))
 
-    async def send_full_msg(self, channel_name: str, text: str) -> None:
+    async def send_full_msg(self, channel_name: str, text: str, images: list[dict] | None = None) -> None:
         """Atomic chunk + end convenience — single complete message."""
-        await self.send_chunk(channel_name, text)
+        await self.send_chunk(channel_name, text, images)
         await self.end_msg(channel_name)
 
     # WebSocket handler

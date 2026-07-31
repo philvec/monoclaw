@@ -23,6 +23,15 @@ class Answer(BaseModel):
             "Apply channel rules from your system prompt when deciding."
         ),
     )
+    attachments: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Image files to attach to the delivered message. Use ONLY a filename you have actually been "
+            "shown in a '[IMAGE <file> <mime>]' marker — i.e. the result of fetch_image or view_image, or "
+            "an image the user sent you. Pass the bare <file> part, not the whole marker. Attach a picture "
+            "only when the user asked to be sent one; leave empty otherwise. Never invent a filename."
+        ),
+    )
 
 
 class Review(BaseModel):

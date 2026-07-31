@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
 
+import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from channels import WebSocketChannelManager
@@ -89,6 +90,7 @@ class ToolRegistry:
         tools: list[Tool[Any]] = [
             ReadFileTool(cfg),
             ViewImageTool(cfg),
+            FetchImageTool(cfg),
             WriteFileTool(cfg),
             EditFileTool(cfg),
             GlobTool(cfg),
@@ -224,6 +226,37 @@ class ViewImageTool(Tool["ViewImageTool.Params"]):
         logger.info(f"🖼️ view_image: {params.path} → {fname}")
         # Marker must lead — agent._expand_markers only treats leading lines as image markers.
         return f"[IMAGE {fname} {mime}]\n(showing {params.path})"
+
+
+class FetchImageTool(Tool["FetchImageTool.Params"]):
+    """Download an image from a URL and look at it. The picture is added to your context, so you can
+    check what it actually shows before deciding to send it. Use the returned filename in
+    Answer.attachments to deliver it to the user."""
+
+    _MAX_BYTES = 8_000_000
+
+    class Params(BaseModel):
+        url: str = Field(description="Direct URL of an image file (jpg, png, webp, gif, bmp)")
+
+    async def execute(self, params: Params) -> str:  # type: ignore[override]
+        if not params.url.lower().startswith(("http://", "https://")):
+            return f"error: not an http(s) url: {params.url!r}"
+        async with httpx.AsyncClient(follow_redirects=True, max_redirects=5) as client:
+            resp = await client.get(params.url, timeout=20.0, headers={"User-Agent": "monoclaw/1.0"})
+            resp.raise_for_status()
+            mime = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+            if mime not in ViewImageTool._MIMES:
+                return f"error: {params.url} is {mime or 'unknown type'}, not a supported image"
+            if len(resp.content) > self._MAX_BYTES:
+                return f"error: image is {len(resp.content) / 1e6:.1f} MB (limit {self._MAX_BYTES / 1e6:.0f} MB)"
+            data = resp.content
+        IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+        fname = f"{stamp}-fetched{mimetypes.guess_extension(mime) or '.bin'}"
+        (IMAGES_DIR / fname).write_bytes(data)
+        logger.info(f"🖼️ fetch_image: {params.url} → {fname} ({len(data) / 1e3:.0f} kB)")
+        # Marker must lead — agent._expand_markers only treats leading lines as image markers.
+        return f"[IMAGE {fname} {mime}]\n(fetched from {params.url})"
 
 
 class WriteFileTool(Tool["WriteFileTool.Params"]):
