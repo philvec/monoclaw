@@ -14,13 +14,18 @@ from llm import LLMClient
 from models import Review
 
 MAX_NEGATIVE_REVIEWS = 4
+_MAX_REQUEST_CHARS = 2000  # group turns carry a whole transcript; keep the marker readable
 
 _REVIEW_PROMPT = (
     "REVIEW (internal, not delivered). Evaluate the preceding assistant message: "
-    "(1) Is the message non-empty and an actual answer to what was asked? Every turn must deliver a "
-    "reply — there is no silent option. An empty message, or one that answers a different question, "
-    "is is_correct=False. Admitting inability ('I could not find X', 'that tool failed') IS a valid "
-    "answer when it is what happened. "
+    "(1) Is the message non-empty and an actual answer to what was asked? Judge that ONLY against the "
+    "'[CURRENT REQUEST]' block below — it is the message being answered right now. The conversation "
+    "above contains earlier, already-completed requests; those are SUPERSEDED and must never be used "
+    "as the thing to answer. Never reject a response for not matching what was asked 'originally' or "
+    "in a previous turn, and never tell the assistant to send a result belonging to an earlier "
+    "request. Every turn must deliver a reply — there is no silent option. An empty message, or one "
+    "that answers a different question than the [CURRENT REQUEST], is is_correct=False. Admitting "
+    "inability ('I could not find X', 'that tool failed') IS a valid answer when it is what happened. "
     "(2) Does the justification cite a specific, named source — exact tool result, memory entry, "
     "quoted past message, named channel rule, or system prompt / MASTER.md content — that verifiably "
     "supports EVERY claim in the message? "
@@ -132,16 +137,26 @@ class Reviewer:
         assistant_msg: ChatCompletionAssistantMessageParam,
         justification: str = "",
         attachment_parts: list[Any] | None = None,
+        current_request: str = "",
     ) -> Review:
         review_msgs = self._build_review_prefix(messages)
         assistant_content = str(assistant_msg.get("content") or "")
+        # Without an explicit marker the reviewer has to guess which of the many requests in history
+        # is the live one, and it reliably picks an earlier, better-established one: it rejected a
+        # correct "two red circles on yellow" for not being the "originally requested" three circles
+        # from two turns before, and the agent then sent the older image.
+        ask = " ".join((current_request or "").split()) or "(not captured)"
+        if len(ask) > _MAX_REQUEST_CHARS:
+            ask = ask[:_MAX_REQUEST_CHARS] + "… [truncated]"
         # The justification lives only on the parsed Answer and is never part of `messages`. Without
         # it the reviewer — whose whole job is auditing it — sees nothing and rejects for "missing
         # justification" on a response that supplied one, which the agent then cannot fix.
         review_msgs.append(
             ChatCompletionUserMessageParam(
                 role="user",
-                content=f"[ASSISTANT JUSTIFICATION]\n{justification or '(none provided)'}\n\n"
+                content=f"[CURRENT REQUEST — the response below must answer THIS, not any earlier "
+                f"request in the conversation]\n{ask}\n\n"
+                f"[ASSISTANT JUSTIFICATION]\n{justification or '(none provided)'}\n\n"
                 f"[ASSISTANT RESPONSE TO REVIEW]\n{assistant_content}",
             )
         )

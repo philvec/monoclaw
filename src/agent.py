@@ -152,6 +152,13 @@ def _resolve_attachments(names: list[str]) -> tuple[list[str], list[str]]:
     return markers, rejected
 
 
+def _request_preview(text: str, limit: int = 2000) -> str:
+    """One-line form of the inbound request, for the 'answer THIS' markers. Group turns carry a
+    whole transcript, so cap it."""
+    one_line = " ".join((text or "").split()) or "(no text)"
+    return one_line if len(one_line) <= limit else one_line[:limit] + "… [truncated]"
+
+
 def _available_attachments(messages: list[ChatCompletionMessageParam]) -> list[str]:
     """Marker filenames present in this turn — the only names that may legitimately be attached.
     Used to make a rejection actionable: the model reliably invents a descriptive filename
@@ -584,6 +591,9 @@ class AgentLoop:
                 ChatCompletionUserMessageParam(
                     role="user",
                     content=(
+                        f"The request you must answer NOW is: {_request_preview(msg.text)}\n"
+                        "Anything asked earlier in this conversation is already done and superseded — "
+                        "do not answer it again or resend its result.\n"
                         "Produce your Answer as a JSON object: justification (str), message (str), "
                         "attachments (list[str], omit when empty). message must never be empty — every "
                         "turn gets an answer. "
@@ -650,6 +660,7 @@ class AgentLoop:
                     assistant_msg,
                     initial_answer.justification,
                     attachment_parts=_expand_markers("\n".join(att_markers)) if att_markers else None,
+                    current_request=msg.text,
                 )
                 if review.is_correct and att_rejected:
                     avail = _available_attachments(messages)
