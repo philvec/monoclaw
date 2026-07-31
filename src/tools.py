@@ -11,7 +11,7 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from channels import WebSocketChannelManager
-from config import Config, IMAGES_DIR, logger
+from config import Config, IMAGE_MIME_EXT, IMAGES_DIR, logger, sniff_image_mime
 from llm import LLMClient
 from mcp_client import note_mcp_result
 from memory_store import MemoryStore
@@ -197,8 +197,8 @@ class ViewImageTool(Tool["ViewImageTool.Params"]):
     """Look at an image file inside the workspace. The picture itself is added to your context,
     so you can describe or answer questions about what it shows."""
 
-    # mtmd decodes via stb_image; keep the advertised set to what it actually handles.
-    _MIMES = {"image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"}
+    # mtmd decodes via stb_image; IMAGE_MIME_EXT is the single source of truth for what we handle.
+    _MIMES = set(IMAGE_MIME_EXT)
 
     class Params(BaseModel):
         path: str = Field(description="Relative path to an image file (jpg, png, webp, gif, bmp)")
@@ -213,8 +213,11 @@ class ViewImageTool(Tool["ViewImageTool.Params"]):
                 return f"image not found: {params.path}"
             # Already stored, and already attached to the message it came from: re-showing it would
             # duplicate the picture in context for no gain.
-            return f"[IMAGE {stored.name} {mimetypes.guess_type(stored.name)[0] or 'image/jpeg'}]"
+            stored_mime = mimetypes.guess_type(stored.name)[0] or sniff_image_mime(stored.read_bytes()[:16])
+            return f"[IMAGE {stored.name} {stored_mime or 'image/jpeg'}]"
         mime = mimetypes.guess_type(target.name)[0] or ""
+        if mime not in self._MIMES:
+            mime = sniff_image_mime(target.read_bytes()[:16])  # e.g. .webp is absent from mimetypes
         if mime not in self._MIMES:
             return f"not a supported image: {params.path} (detected {mime or 'unknown'})"
         # Copy into IMAGES_DIR so the marker resolves for the rest of the conversation even if the
@@ -252,7 +255,7 @@ class FetchImageTool(Tool["FetchImageTool.Params"]):
             data = resp.content
         IMAGES_DIR.mkdir(parents=True, exist_ok=True)
         stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
-        fname = f"{stamp}-fetched{mimetypes.guess_extension(mime) or '.bin'}"
+        fname = f"{stamp}-fetched{IMAGE_MIME_EXT.get(mime) or '.img'}"
         (IMAGES_DIR / fname).write_bytes(data)
         logger.info(f"🖼️ fetch_image: {params.url} → {fname} ({len(data) / 1e3:.0f} kB)")
         # Marker must lead — agent._expand_markers only treats leading lines as image markers.

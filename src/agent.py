@@ -21,7 +21,9 @@ from config import (
     ARCHIVE_DIR,
     CRON_CHANNEL,
     IMAGE_HISTORY_TURNS,
+    IMAGE_MIME_EXT,
     IMAGES_DIR,
+    sniff_image_mime,
     logger,
     MAX_STORED_MSG_CHARS,
     SYSERR,
@@ -61,7 +63,7 @@ def _persist_user_content(msg: InboundMessage) -> str:
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     markers: list[str] = []
     for i, img in enumerate(msg.images):
-        fname = f"{msg.timestamp}-{i}{mimetypes.guess_extension(img.mime) or '.bin'}"
+        fname = f"{msg.timestamp}-{i}{IMAGE_MIME_EXT.get(img.mime) or mimetypes.guess_extension(img.mime) or '.img'}"
         (IMAGES_DIR / fname).write_bytes(base64.b64decode(img.data, validate=True))
         markers.append(f"{IMAGE_MARKER_PREFIX}{fname} {img.mime}]")
     logger.info(f"🖼️ stored {len(markers)} image(s) from {msg.channel!r} in {IMAGES_DIR}")
@@ -104,8 +106,13 @@ def _resolve_attachments(names: list[str]) -> tuple[list[str], list[str]]:
         m = _IMAGE_MARKER.match(raw.strip())
         fname = Path(m.group(1) if m else raw.strip()).name
         path = IMAGES_DIR / fname
+        if not fname or not path.is_file():
+            rejected.append(raw)
+            continue
         mime = mimetypes.guess_type(fname)[0] or ""
-        if not fname or not path.is_file() or not mime.startswith("image/"):
+        if not mime.startswith("image/"):
+            mime = sniff_image_mime(path.read_bytes()[:16])
+        if not mime:
             rejected.append(raw)
             continue
         markers.append(f"{IMAGE_MARKER_PREFIX}{fname} {mime}]")

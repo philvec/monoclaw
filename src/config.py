@@ -24,6 +24,33 @@ ARCHIVE_DIR = Path("./data/archive")
 # history itself stays str-only (see agent._persist_user_content). Deliberately outside
 # ./data/workspace so the shell/write_file tools cannot reach them.
 IMAGES_DIR = Path("./data/images")
+# Explicit, because mimetypes.guess_extension("image/webp") is None on this Python: a fetched webp
+# would be stored as "*.bin" and then rejected as an attachment for not looking like an image.
+IMAGE_MIME_EXT = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+}
+
+
+def sniff_image_mime(head: bytes) -> str:
+    """Identify an image from its magic bytes. Filenames are not trustworthy: a stored file may have
+    no extension, or one the local mimetypes db has no entry for (notably .webp)."""
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if head.startswith(b"BM"):
+        return "image/bmp"
+    return ""
+
+
 IMAGE_HISTORY_TURNS = 2  # newest marker messages expanded into the prompt; older stay marker text
 WS_MAX_FRAME_BYTES = 16 * 1024 * 1024  # base64 images exceed the websockets default (1 MB)
 
