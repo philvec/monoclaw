@@ -316,11 +316,12 @@ class AgentLoop:
                 # which lights are on…"), so deliver it now — before the tools run, which is the
                 # only moment it is still useful. Deliberately NOT setting turn_delivered: the
                 # answer is still outstanding, so the safety net below must stay armed.
-                if response.content and response.content.strip() and msg.channel != CRON_CHANNEL:
-                    preview = response.content[:120] + ("…" if len(response.content) > 120 else "")
+                interim = (response.content or "").strip()
+                if interim and msg.channel != CRON_CHANNEL:
+                    preview = interim[:120] + ("…" if len(interim) > 120 else "")
                     logger.info(f"📤 delivering interim to {msg.channel!r}: {preview!r}")
                     try:
-                        await self._channel_manager.send_full_msg(msg.channel, response.content)
+                        await self._channel_manager.send_full_msg(msg.channel, interim)
                     except Exception as exc:
                         logger.warning(f"interim delivery to {msg.channel!r} skipped: {exc}")
 
