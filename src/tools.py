@@ -1,7 +1,6 @@
 import asyncio
 import json
 import mimetypes
-import os
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -89,13 +88,13 @@ class ToolRegistry:
         registry = cls()
         tools: list[Tool[Any]] = [
             ReadFileTool(cfg),
-            ViewImageTool(cfg),
-            FetchImageTool(cfg),
+            ReadImageTool(cfg),
+            DownloadImageTool(cfg),
             WriteFileTool(cfg),
             EditFileTool(cfg),
             GlobTool(cfg),
             GrepTool(cfg),
-            ShellTool(cfg),
+            RunCommandTool(cfg),
             ScheduleTool(cfg, cron),
             SendMessageTool(cfg, channel_manager),
             ListChannelsTool(cfg, channel_manager),
@@ -165,25 +164,6 @@ class ToolRegistry:
         return f"unknown tool: {name!r}"
 
 
-_VENV_BIN = Path("/app/.venv/bin")
-
-
-def _shell_env() -> dict[str, str]:
-    """Environment for shell subprocesses, with the app venv on PATH.
-
-    The app is started by `uv run`, which points at the venv's interpreter without exporting
-    VIRTUAL_ENV or putting it on PATH. Subprocesses therefore inherited a PATH where `python` is
-    the bare system interpreter — so `python script.py` died with ModuleNotFoundError for anything
-    the app itself depends on (pillow, numpy, httpx), and the model reasonably concluded it could
-    not run scripts at all.
-    """
-    env = dict(os.environ)
-    if _VENV_BIN.is_dir():
-        env["PATH"] = f"{_VENV_BIN}:{env.get('PATH', '')}"
-        env["VIRTUAL_ENV"] = str(_VENV_BIN.parent)
-    return env
-
-
 def _safe_path(rel: str) -> Path:
     """Resolve rel relative to _WORKSPACE; raise ValueError if it escapes."""
     base = _WORKSPACE.resolve()
@@ -213,11 +193,9 @@ class ReadFileTool(Tool["ReadFileTool.Params"]):
         return "\n".join(f"{start + i + 1}\t{line}" for i, line in enumerate(chunk))
 
 
-class ViewImageTool(Tool["ViewImageTool.Params"]):
-    """Show an image file that is already in the workspace — e.g. one a script just generated.
-    The picture is added to your context so you can check what it shows, AND the filename it returns
-    goes into Answer.attachments to send that file to the user. THIS is the tool for showing a local
-    file; fetch_image is only for downloading from an http(s) URL."""
+class ReadImageTool(Tool["ReadImageTool.Params"]):
+    """Look at an image file in the workspace. The filename it returns goes in Answer.attachments
+    to send that image to the user."""
 
     # mtmd decodes via stb_image; IMAGE_MIME_EXT is the single source of truth for what we handle.
     _MIMES = set(IMAGE_MIME_EXT)
@@ -252,7 +230,7 @@ class ViewImageTool(Tool["ViewImageTool.Params"]):
         stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
         fname = f"{stamp}-{target.stem}{IMAGE_MIME_EXT.get(mime) or '.img'}"
         (IMAGES_DIR / fname).write_bytes(data)
-        logger.info(f"🖼️ view_image: {params.path} → {fname}")
+        logger.info(f"🖼️ read_image: {params.path} → {fname}")
         # Marker must lead — agent._expand_markers only treats leading lines as image markers.
         return (
             f"[IMAGE {fname} {mime}]\n(showing {params.path})\n"
@@ -260,11 +238,9 @@ class ViewImageTool(Tool["ViewImageTool.Params"]):
         )
 
 
-class FetchImageTool(Tool["FetchImageTool.Params"]):
-    """Download an image from an http(s) URL on the web and look at it. The picture is added to your
-    context, so you can check what it actually shows before deciding to send it; the returned filename
-    goes in Answer.attachments to deliver it to the user. Web URLs ONLY — for a file that is already
-    in the workspace (e.g. one you just generated), use view_image instead."""
+class DownloadImageTool(Tool["DownloadImageTool.Params"]):
+    """Download an image from an http(s) URL and look at it. The filename it returns goes in
+    Answer.attachments to send that image to the user."""
 
     _MAX_BYTES = 8_000_000
 
@@ -276,14 +252,13 @@ class FetchImageTool(Tool["FetchImageTool.Params"]):
             # Observed: the model reaches here with file:///workspace/x.png or a localhost URL when it
             # wants to show a file it just made. Name the right tool instead of just refusing.
             return (
-                f"error: not an http(s) url: {params.url!r}. fetch_image only downloads from the web — "
-                "to show a file that is already in the workspace, call view_image with its relative path."
+                f"error: not an http(s) url: {params.url!r}. Use read_image for a workspace file."
             )
         async with httpx.AsyncClient(follow_redirects=True, max_redirects=5) as client:
             resp = await client.get(params.url, timeout=20.0, headers={"User-Agent": "monoclaw/1.0"})
             resp.raise_for_status()
             mime = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-            if mime not in ViewImageTool._MIMES:
+            if mime not in ReadImageTool._MIMES:
                 return f"error: {params.url} is {mime or 'unknown type'}, not a supported image"
             if len(resp.content) > self._MAX_BYTES:
                 return f"error: image is {len(resp.content) / 1e6:.1f} MB (limit {self._MAX_BYTES / 1e6:.0f} MB)"
@@ -296,7 +271,7 @@ class FetchImageTool(Tool["FetchImageTool.Params"]):
         stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
         fname = f"{stamp}-fetched{IMAGE_MIME_EXT.get(mime) or '.img'}"
         (IMAGES_DIR / fname).write_bytes(data)
-        logger.info(f"🖼️ fetch_image: {params.url} → {fname} ({len(data) / 1e3:.0f} kB)")
+        logger.info(f"🖼️ download_image: {params.url} → {fname} ({len(data) / 1e3:.0f} kB)")
         # Marker must lead — agent._expand_markers only treats leading lines as image markers.
         # The exact attachments value is spelled out because the model otherwise invents a
         # descriptive filename ("wawel-castle-krakow.jpg") instead of copying this opaque one.
@@ -307,8 +282,7 @@ class FetchImageTool(Tool["FetchImageTool.Params"]):
 
 
 class WriteFileTool(Tool["WriteFileTool.Params"]):
-    """Write content to a file inside the workspace, creating it if needed. This only SAVES the file —
-    it does not execute anything. Running is a different tool: use shell for that."""
+    """Write a file in the workspace. Saves only — use run_command to run it."""
 
     class Params(BaseModel):
         path: str = Field(description="Relative path to file")
@@ -325,8 +299,7 @@ class WriteFileTool(Tool["WriteFileTool.Params"]):
             # it thought it had.
             runner = "python" if target.suffix == ".py" else "bash"
             out += (
-                f"\nSaved, not executed — write_file cannot run anything. "
-                f"To run it, use the shell tool: `{runner} {params.path}`"
+                f"\nSaved, not executed. To run it: run_command `{runner} {params.path}`"
             )
         return out
 
@@ -399,11 +372,9 @@ class GrepTool(Tool["GrepTool.Params"]):
         return "\n".join(results) if results else "no matches"
 
 
-class ShellTool(Tool["ShellTool.Params"]):
-    """Run a shell command; the working directory is the workspace. This is the only tool that
-    EXECUTES anything: write_file saves a file, shell runs it (e.g. `python draw.py` after writing
-    draw.py). `python` already has pillow, numpy and httpx. For any other package, run it with uv
-    instead of installing anything: `uv run --with <package> python script.py`."""
+class RunCommandTool(Tool["RunCommandTool.Params"]):
+    """Run a shell command in the workspace. This is how you execute anything. Bare `python` has no
+    third-party packages; `uv` and `uvx` are installed, e.g. `uvx --with pillow python draw.py`."""
 
     _DENY_PATTERNS: list[re.Pattern[str]] = [
         re.compile(p, re.IGNORECASE)
@@ -433,7 +404,7 @@ class ShellTool(Tool["ShellTool.Params"]):
     @staticmethod
     def _classify(command: str) -> str | None:
         """Return a denial reason if the command is blocked, else None."""
-        for pat in ShellTool._DENY_PATTERNS:
+        for pat in RunCommandTool._DENY_PATTERNS:
             if pat.search(command):
                 return f"command blocked by safety classifier (matched: {pat.pattern!r})"
         return None
@@ -449,7 +420,6 @@ class ShellTool(Tool["ShellTool.Params"]):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(_WORKSPACE.resolve()),
-                env=_shell_env(),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             exit_code, output = proc.returncode or 0, stdout.decode(errors="replace")
@@ -537,12 +507,8 @@ class ScheduleTool(Tool["ScheduleTool.Params"]):
 
 
 class DeferTurnTool(Tool["DeferTurnTool.Params"]):
-    """Schedule a future turn so YOU regain initiative without waiting for a user message. \
-Use this after sending a message when you want to follow up later, check on something, or \
-continue a thread after a delay (e.g. you reminded the wife to take meds — defer 30 min and \
-report back to the user). The `note` becomes the user message that fires the turn. \
-For recurring chores (daily reports, periodic checks), use `schedule` instead — this is for \
-one-shot self-wakeups that complete a workflow."""
+    """Wake yourself once after a delay to follow something up; `note` becomes the message that
+    starts that turn. For anything recurring use `schedule` instead."""
 
     def __init__(self, cfg: Config, cron: CronService) -> None:
         super().__init__(cfg)
@@ -582,11 +548,8 @@ one-shot self-wakeups that complete a workflow."""
 
 
 class SendMessageTool(Tool["SendMessageTool.Params"]):
-    """Send a complete message to a named channel — FAN-OUT ONLY. Use this to notify someone \
-on a DIFFERENT channel from the inbound one (e.g. cc the wife while replying to a friend). \
-You do NOT need this tool to reply to the sender of the current turn — that reply is produced \
-simply by writing it as your assistant content, and the runtime auto-delivers it to the INPUT \
-CHANNEL. This tool is for reaching *other* recipients in the same turn."""
+    """Message a DIFFERENT channel than the one you are replying to (e.g. cc someone else). Your
+    reply to the current channel needs no tool — it is delivered automatically."""
 
     def __init__(self, cfg: Config, channel_manager: WebSocketChannelManager) -> None:
         super().__init__(cfg)
@@ -607,8 +570,7 @@ CHANNEL. This tool is for reaching *other* recipients in the same turn."""
 
 
 class ListChannelsTool(Tool["ListChannelsTool.Params"]):
-    """List currently connected channels you can target with `send_message` for fan-out. \
-Use before fanning out if you're not sure who's reachable."""
+    """List channels currently reachable via send_message."""
 
     def __init__(self, cfg: Config, channel_manager: WebSocketChannelManager) -> None:
         super().__init__(cfg)
@@ -675,9 +637,8 @@ class MemoryReadTool(Tool["MemoryReadTool.Params"]):
 
 
 class MasterMemoryTool(Tool["MasterMemoryTool.Params"]):
-    """Read or update master memory — core identity and instructions always in the system prompt. \
-Use for: user name, language, timezone, key behavioral rules, critical context. \
-Only update when the user explicitly asks. Changes affect every future turn."""
+    """Read or update master memory — the rules always present in your system prompt. Only update
+    when the user explicitly asks; changes affect every future turn."""
 
     def __init__(self, cfg: Config, store: MemoryStore) -> None:
         super().__init__(cfg)

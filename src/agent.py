@@ -123,7 +123,7 @@ def _resolve_attachments(names: list[str]) -> tuple[list[str], list[str]]:
         fname = Path(m.group(1) if m else raw.strip()).name
         path = IMAGES_DIR / fname
         if fname and not path.is_file():
-            # view_image/fetch_image store a timestamp-prefixed copy ("<stamp>-black_square.png"),
+            # read_image/download_image store a timestamp-prefixed copy ("<stamp>-black_square.png"),
             # but the model naturally attaches the name it knows ("black_square.png"). Accept that
             # and resolve to the newest stored copy rather than rejecting a picture it really saw.
             matches = sorted(p.name for p in IMAGES_DIR.glob(f"*-{fname}") if p.is_file())
@@ -188,7 +188,7 @@ def _with_images(messages: list[ChatCompletionMessageParam]) -> list[ChatComplet
     parts. Returns a NEW list — `messages` and session history must stay str-only.
 
     Tool results are expanded too: the Qwen chat template renders a tool message inside a user block,
-    so images are legal there, which is how view_image gets its picture into the context.
+    so images are legal there, which is how read_image gets its picture into the context.
     """
     idxs = [
         i
@@ -232,16 +232,10 @@ _SCHEMA_INSTRUCTIONS = (
     "named memory entry (e.g. 'memory user-prefers-polish'), quoted past message, exact channel rule, "
     "or an image you were shown (a '[IMAGE ...]' message; cite as 'attached image shows X'). "
     "A message starting with '[IMAGE <file> <mime>]' has that picture ATTACHED — you can already see it, "
-    "so describe it directly. Do NOT call view_image (or read_file/shell) on that filename: it is an "
-    "internal reference, not a workspace file, and looking it up will fail. view_image is only for image "
-    "files in the workspace that were NOT attached to a message.\n"
-    "- SENDING A PICTURE: when the user asks you to send/show them a picture, the ONLY way to deliver one "
-    "is the `attachments` field. Workflow: image_search (get candidate URLs) → fetch_image on the best URL "
-    "(this SHOWS you the picture — check it really is what was asked for, and fetch another if not) → put "
-    "that filename in `attachments` and write your reply in `message`. Pasting URLs into the message text "
-    "does NOT send a picture and does not satisfy the request. Never use send_message or send_email to "
-    "deliver a reply to the person you are already talking to — your `message` is auto-delivered to the "
-    "INPUT CHANNEL, and `attachments` rides along with it. "
+    "so describe it directly — that filename is an internal reference, not a workspace file.\n"
+    "- SENDING A PICTURE: `attachments` is the only way. Get the picture into your context first "
+    "(image_search → download_image for the web, read_image for a workspace file), check it is really "
+    "what was asked for, then put that filename in `attachments`. A URL in the message text sends nothing. "
     "For any admission of inability (e.g. 'I don't have that data', 'I found nothing'): cite the tool "
     "you ran and what it returned, AND the rule that directs you to inform the user of this. "
     "Vague justifications ('seemed appropriate', 'no relevant info') will fail review.\n"
@@ -258,7 +252,7 @@ _SCHEMA_INSTRUCTIONS = (
     "empty message is always a bug, never a choice.\n"
     "INTERIM LINE — REQUIRED BEFORE EVERY TOOL CALL: before you use any tool, say what you are about to "
     "do in exactly ONE short line of plain text (e.g. 'Szukam w sieci…', 'Piszę skrypt do policzenia "
-    "tego…'). The user sees it straight away. Applies to EVERY tool — searches, file writes, shell "
+    "tego…'). The user sees it straight away. Applies to EVERY tool — searches, file writes, run_command "
     "commands, memory reads alike. Exactly one line, never two, never the final answer — every time you "
     "reach for a tool, not just the slow ones. Do NOT use send_message for this; it is fan-out only and "
     "is refused for the input channel.\n"
@@ -563,15 +557,15 @@ class AgentLoop:
                         )
                     elif call_counts[sig] > _REPEATED_CALL_LIMIT:
                         # Observed live: 13 consecutive identical write_file calls creating a Python
-                        # "runner" script, narrating "I'll run it" each time and never calling shell.
+                        # "runner" script, narrating "I'll run it" each time and never calling run_command.
                         # Repeating a call that already succeeded cannot make progress — say so.
                         logger.warning(f"🔁 blocked repeat #{call_counts[sig]} of {tc.name!r} — same arguments")
                         result = (
                             f"error: you already called {tc.name} with these exact arguments "
                             f"{call_counts[sig] - 1} time(s) this turn, so calling it again changes "
                             "nothing. Use a DIFFERENT tool for the next step. Note write_file only "
-                            "saves a file, it never executes it — running something is the shell "
-                            "tool (e.g. `python draw_square.py`). If the work is already done, stop "
+                            "saves a file, it never executes it — running something is run_command "
+                            "(e.g. `python draw_square.py`). If the work is already done, stop "
                             "calling tools and write your answer."
                         )
                     else:
@@ -650,7 +644,7 @@ class AgentLoop:
                     logger.warning(f"dropped unknown attachment(s): {att_rejected}")
                 # The reviewer sees the pictures too. Without them it cannot verify a description of
                 # an image, falls back on "the claimed tool call is missing", and rejects every
-                # correct image answer — which then drives the agent into a doomed view_image hunt.
+                # correct image answer — which then drives the agent into a doomed read_image hunt.
                 review = await self._reviewer.run_review(
                     _with_images(messages),
                     assistant_msg,
@@ -666,7 +660,7 @@ class AgentLoop:
                             + (
                                 f"Copy one of these EXACTLY into attachments: {avail}."
                                 if avail
-                                else "No image has been fetched this turn — call fetch_image first, then "
+                                else "No image has been fetched this turn — call download_image first, then "
                                 "copy the filename from the '[IMAGE <file> <mime>]' marker it returns."
                             )
                         ],
@@ -702,7 +696,7 @@ class AgentLoop:
             # burning all four retries without ever addressing what the reviewer objected to.
             fixes_text = " ".join(review.to_be_fixed).lower()
             tool_clause = ""
-            if any(t in fixes_text for t in ("edit_file", "write_file", "shell", "tool call", "tool result")):
+            if any(t in fixes_text for t in ("edit_file", "write_file", "run_command", "tool call", "tool result")):
                 tool_clause = (
                     "The rejection cites a tool: you MUST call that tool in your very next response — "
                     "do NOT reword the claim without executing the action first. "
