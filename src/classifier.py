@@ -187,6 +187,11 @@ class FastClassifier:
         # immediate, plain text answer
         preview = verdict.output[:120] + ("…" if len(verdict.output) > 120 else "")
         logger.info(f"⚡ classified IMMEDIATE/answer [{msg.channel}] → {preview!r}")
+        if not verdict.output.strip():
+            # An empty immediate answer delivers nothing but still records the turn as handled, so the
+            # message would die here: no reply, no agent, no reviewer. Never a valid outcome.
+            logger.warning(f"⚡ IMMEDIATE with empty output on {msg.channel!r} — passthrough to main agent")
+            return Decision(handled=False, preamble="[FAST CLASSIFIER ERROR: immediate answer was empty]")
         try:
             await self._agent.record_immediate(msg, verdict.output)
         except Exception as exc:
