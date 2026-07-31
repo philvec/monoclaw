@@ -106,11 +106,19 @@ class Reviewer:
         self,
         messages: list[ChatCompletionMessageParam],
         assistant_msg: ChatCompletionAssistantMessageParam,
+        justification: str = "",
     ) -> Review:
         review_msgs = self._build_review_prefix(messages)
         assistant_content = str(assistant_msg.get("content") or "")
+        # The justification lives only on the parsed Answer and is never part of `messages`. Without
+        # it the reviewer — whose whole job is auditing it — sees nothing and rejects for "missing
+        # justification" on a response that supplied one, which the agent then cannot fix.
         review_msgs.append(
-            ChatCompletionUserMessageParam(role="user", content="[ASSISTANT RESPONSE TO REVIEW]\n" + assistant_content)
+            ChatCompletionUserMessageParam(
+                role="user",
+                content=f"[ASSISTANT JUSTIFICATION]\n{justification or '(none provided)'}\n\n"
+                f"[ASSISTANT RESPONSE TO REVIEW]\n{assistant_content}",
+            )
         )
         resp = await self._llm.chat(review_msgs, response_model=Review)
         if isinstance(resp.parsed, Review):

@@ -57,10 +57,11 @@ _SCHEMA_INSTRUCTIONS = (
     "If stay_silent=False, message MUST be non-empty — an empty message with stay_silent=False is invalid.\n"
     "- stay_silent: True to stay silent (internal work only); False to deliver message.\n"
     "INTERIM LINE — REQUIRED BEFORE EVERY TOOL CALL: before you use any tool, say what you are about to "
-    "do in exactly ONE short line of plain text (e.g. 'Sprawdzam historię świateł…'). The user sees it "
-    "straight away. Exactly one line, never two, never the final answer — every time you reach for a tool, "
-    "not just the slow ones. Do NOT use send_message for this; it is fan-out only and is refused for the "
-    "input channel.\n"
+    "do in exactly ONE short line of plain text (e.g. 'Szukam w sieci…', 'Piszę skrypt do policzenia "
+    "tego…'). The user sees it straight away. Applies to EVERY tool — searches, file writes, shell "
+    "commands, memory reads alike. Exactly one line, never two, never the final answer — every time you "
+    "reach for a tool, not just the slow ones. Do NOT use send_message for this; it is fan-out only and "
+    "is refused for the input channel.\n"
     "Every response is reviewed. The reviewer verifies that every claim in the message and the "
     "stay_silent decision are each traceable to a specific cited source in the justification.\n"
     "TOOL POLICY: For questions about specific named entities (people, places, organisations, events), "
@@ -398,7 +399,7 @@ class AgentLoop:
                     ],
                 )
             else:
-                review = await self._reviewer.run_review(messages, assistant_msg)
+                review = await self._reviewer.run_review(messages, assistant_msg, initial_answer.justification)
 
             if review_start_idx < 0:
                 review_start_idx = len(messages)
@@ -430,10 +431,19 @@ class AgentLoop:
             reviewer_content = "[REVIEW — is_correct=False]"
             if review.to_be_fixed:
                 reviewer_content += "\n" + "\n".join(f"- {p}" for p in review.to_be_fixed)
+            # Only demand a tool call when the rejection actually asked for one. Appending it
+            # unconditionally made the model re-run the same write_file+shell on every rejection,
+            # burning all four retries without ever addressing what the reviewer objected to.
+            fixes_text = " ".join(review.to_be_fixed).lower()
+            tool_clause = ""
+            if any(t in fixes_text for t in ("edit_file", "write_file", "shell", "tool call", "tool result")):
+                tool_clause = (
+                    "The rejection cites a tool: you MUST call that tool in your very next response — "
+                    "do NOT reword the claim without executing the action first. "
+                )
             reviewer_content += (
-                "\nRetry. If the rejection cited a missing tool call (e.g. edit_file, write_file, shell), "
-                "you MUST call that tool in your very next response — do NOT reword the claim without executing the action first. "
-                "All three fields required: justification (str), message (str), stay_silent (bool). "
+                "\nRetry. " + tool_clause + "Address exactly what the rejection listed; do not redo work that "
+                "already succeeded. All three fields required: justification (str), message (str), stay_silent (bool). "
                 "If stay_silent=False, message MUST be non-empty. "
                 "Do NOT switch to stay_silent=True to escape the rejection — the user is waiting for a response. "
                 "Fix the specific problem and deliver a non-silent answer."
