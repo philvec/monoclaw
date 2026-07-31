@@ -1,6 +1,7 @@
 import asyncio
 import json
 import mimetypes
+import os
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -162,6 +163,25 @@ class ToolRegistry:
             note_mcp_result(ok, text, self.current_channel)  # may restart the process
             return text
         return f"unknown tool: {name!r}"
+
+
+_VENV_BIN = Path("/app/.venv/bin")
+
+
+def _shell_env() -> dict[str, str]:
+    """Environment for shell subprocesses, with the app venv on PATH.
+
+    The app is started by `uv run`, which points at the venv's interpreter without exporting
+    VIRTUAL_ENV or putting it on PATH. Subprocesses therefore inherited a PATH where `python` is
+    the bare system interpreter — so `python script.py` died with ModuleNotFoundError for anything
+    the app itself depends on (pillow, numpy, httpx), and the model reasonably concluded it could
+    not run scripts at all.
+    """
+    env = dict(os.environ)
+    if _VENV_BIN.is_dir():
+        env["PATH"] = f"{_VENV_BIN}:{env.get('PATH', '')}"
+        env["VIRTUAL_ENV"] = str(_VENV_BIN.parent)
+    return env
 
 
 def _safe_path(rel: str) -> Path:
@@ -382,7 +402,8 @@ class GrepTool(Tool["GrepTool.Params"]):
 class ShellTool(Tool["ShellTool.Params"]):
     """Run a shell command; the working directory is the workspace. This is the only tool that
     EXECUTES anything: write_file saves a file, shell runs it (e.g. `python draw.py` after writing
-    draw.py). Also use it to check what is available (`python -c "import PIL"`)."""
+    draw.py). `python` already has pillow, numpy and httpx. For any other package, run it with uv
+    instead of installing anything: `uv run --with <package> python script.py`."""
 
     _DENY_PATTERNS: list[re.Pattern[str]] = [
         re.compile(p, re.IGNORECASE)
@@ -428,6 +449,7 @@ class ShellTool(Tool["ShellTool.Params"]):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(_WORKSPACE.resolve()),
+                env=_shell_env(),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             exit_code, output = proc.returncode or 0, stdout.decode(errors="replace")
