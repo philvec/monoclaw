@@ -541,10 +541,11 @@ class AgentLoop:
                         logger.warning(f"🔁 blocked repeat #{call_counts[sig]} of {tc.name!r} — same arguments")
                         result = (
                             f"error: you already called {tc.name} with these exact arguments "
-                            f"{call_counts[sig] - 1} time(s) this turn and it did not move you forward. "
-                            "Repeating it will not help. Do something DIFFERENT: if you need to run a "
-                            "script, call shell (e.g. `python draw_square.py`) — do not write another "
-                            "script to run it. If the work is already done, stop calling tools and answer."
+                            f"{call_counts[sig] - 1} time(s) this turn, so calling it again changes "
+                            "nothing. Use a DIFFERENT tool for the next step. Note write_file only "
+                            "saves a file, it never executes it — running something is the shell "
+                            "tool (e.g. `python draw_square.py`). If the work is already done, stop "
+                            "calling tools and write your answer."
                         )
                     else:
                         result = await self._tool_registry.execute(tc.name, tc.arguments)

@@ -286,8 +286,8 @@ class FetchImageTool(Tool["FetchImageTool.Params"]):
 
 
 class WriteFileTool(Tool["WriteFileTool.Params"]):
-    """Write content to a file inside the workspace, creating it if needed. To RUN what you wrote,
-    call shell — never write a second script whose job is to run the first one."""
+    """Write content to a file inside the workspace, creating it if needed. This only SAVES the file —
+    it does not execute anything. Running is a different tool: use shell for that."""
 
     class Params(BaseModel):
         path: str = Field(description="Relative path to file")
@@ -299,9 +299,14 @@ class WriteFileTool(Tool["WriteFileTool.Params"]):
         target.write_text(params.content)
         out = f"wrote {len(params.content)} chars to {params.path}"
         if target.suffix in (".py", ".sh"):
-            # It kept writing a subprocess-based "runner" instead of just executing the script.
+            # Saying WHY (write_file cannot execute) rather than forbidding the workaround: it kept
+            # writing a subprocess-based "runner", i.e. reaching for execution through the only tool
+            # it thought it had.
             runner = "python" if target.suffix == ".py" else "bash"
-            out += f'\nTo run it, call shell with `{runner} {params.path}` — do not write a runner script.'
+            out += (
+                f"\nSaved, not executed — write_file cannot run anything. "
+                f"To run it, use the shell tool: `{runner} {params.path}`"
+            )
         return out
 
 
@@ -374,9 +379,9 @@ class GrepTool(Tool["GrepTool.Params"]):
 
 
 class ShellTool(Tool["ShellTool.Params"]):
-    """Run a shell command; the working directory is the workspace. This is how you EXECUTE things —
-    after write_file, run the script here (e.g. `python draw.py`) rather than searching the web for
-    how to run it. Also use it to check what is installed (`python -c "import PIL"`)."""
+    """Run a shell command; the working directory is the workspace. This is the only tool that
+    EXECUTES anything: write_file saves a file, shell runs it (e.g. `python draw.py` after writing
+    draw.py). Also use it to check what is available (`python -c "import PIL"`)."""
 
     _DENY_PATTERNS: list[re.Pattern[str]] = [
         re.compile(p, re.IGNORECASE)
