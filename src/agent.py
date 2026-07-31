@@ -518,9 +518,13 @@ class AgentLoop:
                 ChatCompletionUserMessageParam(
                     role="user",
                     content=(
-                        "Produce your Answer as a JSON object: justification (str), message (str), stay_silent (bool). "
+                        "Produce your Answer as a JSON object: justification (str), message (str), "
+                        "stay_silent (bool), attachments (list[str], omit when empty). "
                         "IMPORTANT: if this task required a file edit or other tool action that has NOT yet been "
-                        "performed in this turn, do NOT claim it in message — call the tool first."
+                        "performed in this turn, do NOT claim it in message — call the tool first. "
+                        "If the user asked to be SENT a picture, put the filename from its "
+                        "'[IMAGE <file> <mime>]' marker into attachments — that is the only way it is "
+                        "delivered; describing or linking it does not send it."
                     ),
                 )
             )
