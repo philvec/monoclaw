@@ -118,6 +118,14 @@ def _resolve_attachments(names: list[str]) -> tuple[list[str], list[str]]:
         m = _IMAGE_MARKER.match(raw.strip())
         fname = Path(m.group(1) if m else raw.strip()).name
         path = IMAGES_DIR / fname
+        if fname and not path.is_file():
+            # view_image/fetch_image store a timestamp-prefixed copy ("<stamp>-black_square.png"),
+            # but the model naturally attaches the name it knows ("black_square.png"). Accept that
+            # and resolve to the newest stored copy rather than rejecting a picture it really saw.
+            matches = sorted(p.name for p in IMAGES_DIR.glob(f"*-{fname}") if p.is_file())
+            if matches:
+                fname = matches[-1]
+                path = IMAGES_DIR / fname
         if not fname or not path.is_file():
             rejected.append(raw)
             continue
