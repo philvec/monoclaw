@@ -45,6 +45,7 @@ from tools import ToolRegistry
 
 _MAX_TOOL_ITERATIONS = 20
 _REPEATED_CALL_LIMIT = 2  # identical (name, args) executions per turn before the call is refused
+_TOOL_CALLS_PER_TURN_LIMIT = 6  # per tool NAME — catches loops that vary one argument to evade the above
 _MAX_EXTRACT_CANCELS = 8  # force extraction after this many consecutive deferrals
 _CHECKPOINT_PATH = Path("./data/history.jsonl")
 
@@ -453,6 +454,8 @@ class AgentLoop:
         review_start_idx = -1  # index in messages where first Answer was appended
         review_accepted = False
         call_counts: dict[str, int] = {}  # identical tool calls this turn — see _REPEATED_CALL_LIMIT
+        tool_counts: dict[str, int] = {}  # calls per tool NAME this turn — see _TOOL_CALLS_PER_TURN_LIMIT
+        seen_interims: set[str] = set()  # interim lines already delivered this turn (dedup)
 
         while iterations < _MAX_TOOL_ITERATIONS:
             iterations += 1
@@ -514,11 +517,19 @@ class AgentLoop:
                 interim = (response.content or "").strip()
                 if interim and msg.channel != CRON_CHANNEL:
                     preview = interim[:120] + ("…" if len(interim) > 120 else "")
-                    logger.info(f"📤 delivering interim to {msg.channel!r}: {preview!r}")
-                    try:
-                        await self._channel_manager.send_full_msg(msg.channel, interim)
-                    except Exception as exc:
-                        logger.warning(f"interim delivery to {msg.channel!r} skipped: {exc}")
+                    # Every interim is a real Signal message. A flailing turn repeats the same line
+                    # on each tool call, which spammed a group with four identical messages — send
+                    # each distinct line at most once per turn.
+                    key = " ".join(interim.split()).casefold()
+                    if key in seen_interims:
+                        logger.info(f"🔇 suppressed duplicate interim to {msg.channel!r}: {preview!r}")
+                    else:
+                        seen_interims.add(key)
+                        logger.info(f"📤 delivering interim to {msg.channel!r}: {preview!r}")
+                        try:
+                            await self._channel_manager.send_full_msg(msg.channel, interim)
+                        except Exception as exc:
+                            logger.warning(f"interim delivery to {msg.channel!r} skipped: {exc}")
 
                 if msg.channel != CRON_CHANNEL:
                     try:
@@ -534,7 +545,19 @@ class AgentLoop:
                     logger.info(f"🔧 tool call: {tc.name!r} args={args_preview}")
                     sig = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True, default=str)}"
                     call_counts[sig] = call_counts.get(sig, 0) + 1
-                    if call_counts[sig] > _REPEATED_CALL_LIMIT:
+                    tool_counts[tc.name] = tool_counts.get(tc.name, 0) + 1
+                    if tool_counts[tc.name] > _TOOL_CALLS_PER_TURN_LIMIT:
+                        # The signature guard below is evaded by varying one argument: the observed
+                        # loop wrote its reply to four differently-named files in a row.
+                        logger.warning(f"🔁 blocked {tc.name!r} — {tool_counts[tc.name]} calls this turn")
+                        result = (
+                            f"error: you have called {tc.name} {tool_counts[tc.name] - 1} times this turn, "
+                            "which is well past what this task needs. Changing an argument and calling it "
+                            "again is not progress. Note your reply reaches the user through the `message` "
+                            "field of your answer — it is delivered automatically, so it does not need to be "
+                            "written to a file or sent with another tool. Write your answer now."
+                        )
+                    elif call_counts[sig] > _REPEATED_CALL_LIMIT:
                         # Observed live: 13 consecutive identical write_file calls creating a Python
                         # "runner" script, narrating "I'll run it" each time and never calling shell.
                         # Repeating a call that already succeeded cannot make progress — say so.

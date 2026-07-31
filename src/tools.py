@@ -126,8 +126,9 @@ class ToolRegistry:
         if name == "send_message" and self.current_channel is not None:
             if arguments.get("channel") == self.current_channel:
                 return (
-                    f"error: cannot send_message to the current input channel ({self.current_channel!r}) — "
-                    "reply through the standard Answer instead"
+                    f"error: {self.current_channel!r} is the channel you are already replying to. Your reply "
+                    "reaches it through the `message` field of your answer, which is delivered automatically "
+                    "— you do not need a tool for it. send_message only reaches a DIFFERENT channel."
                 )
         if name in self._tools:
             tool = self._tools[name]
