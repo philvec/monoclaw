@@ -306,7 +306,17 @@ def build_channel_ctx(channel: str) -> str:
     Built at the dispatch layer (main.on_message / handle_cron) and passed via the
     ``preamble`` parameter, rather than deep inside the turn assembly."""
     now = datetime.now(timezone.utc).astimezone()
-    return f"INPUT CHANNEL: {channel}\nCURRENT DATETIME: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+    ctx = f"INPUT CHANNEL: {channel}\nCURRENT DATETIME: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+    if channel == CRON_CHANNEL:
+        # Fires for both `schedule` and `defer_turn` — they share this path. A cron turn breaks
+        # before the Answer phase, so anything written as a normal reply goes nowhere: two pings
+        # were scheduled, both fired on time, and both vanished without a trace.
+        ctx += (
+            "\n[SCHEDULED TURN — this turn has NO output channel. Nothing you write as your reply "
+            "is delivered to anyone. To actually reach someone, call send_message with the target "
+            "channel; that is the only way anything leaves this turn.]"
+        )
+    return ctx
 
 
 class Session(BaseModel):
@@ -582,6 +592,13 @@ class AgentLoop:
 
             # No tool calls — Phase 2: structured call (response_format enforced, no real tools)
             if msg.channel == CRON_CHANNEL:
+                # A cron turn cannot auto-reply, so if it also never called a tool it did nothing at
+                # all. That is how two scheduled pings fired on time and reached nobody, silently.
+                if iterations == 1:
+                    logger.warning(
+                        f"⏰ scheduled turn ended without any tool call — nothing was delivered "
+                        f"(note: {_request_preview(msg.text, 120)!r})"
+                    )
                 break
 
             struct_msgs: list[ChatCompletionMessageParam] = list(messages)

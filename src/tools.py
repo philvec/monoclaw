@@ -439,7 +439,9 @@ def _truncate(text: str, max_chars: int = 10_000) -> str:
 
 
 class ScheduleTool(Tool["ScheduleTool.Params"]):
-    """Manage scheduled tasks. Actions: list/add/remove. For add, provide schedule_type, message, and timing fields."""
+    """Schedule a RECURRING turn — use this for anything that repeats ("every 5 minutes", "daily at
+    8"). Actions: list/add/remove; for add give schedule_type, message and timing. The scheduled turn
+    has no output channel, so it must call send_message to reach anyone."""
 
     def __init__(self, cfg: Config, cron: CronService) -> None:
         super().__init__(cfg)
@@ -507,8 +509,10 @@ class ScheduleTool(Tool["ScheduleTool.Params"]):
 
 
 class DeferTurnTool(Tool["DeferTurnTool.Params"]):
-    """Wake yourself once after a delay to follow something up; `note` becomes the message that
-    starts that turn. For anything recurring use `schedule` instead."""
+    """Wake yourself ONCE after a delay to follow something up; `note` becomes the message that
+    starts that turn. For anything recurring use `schedule` instead. The woken turn has no output
+    channel — nothing it writes as a reply is delivered, so it must call send_message to reach
+    anyone."""
 
     def __init__(self, cfg: Config, cron: CronService) -> None:
         super().__init__(cfg)
