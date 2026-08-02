@@ -61,7 +61,7 @@ _CONFIRM_TEMPLATES = [
 ]
 
 # abstention_line(): two one-line prompts — name the language, then paraphrase in it.
-_LANG_PROMPT = "Name the language this message is written in — answer with its English name, one word only."
+_LANG_PROMPT = "Name the language this message is written in — one word only."
 _ABSTAIN_PROMPT = (
     "Formulate a single short sentence that paraphrases all three similar-meaning sentences below, "
     "in {lang} language — output only that sentence."
