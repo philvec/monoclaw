@@ -312,9 +312,9 @@ def build_channel_ctx(channel: str) -> str:
         # before the Answer phase, so anything written as a normal reply goes nowhere: two pings
         # were scheduled, both fired on time, and both vanished without a trace.
         ctx += (
-            "\n[SCHEDULED TURN — this turn has NO output channel. Nothing you write as your reply "
-            "is delivered to anyone. To actually reach someone, call send_message with the target "
-            "channel; that is the only way anything leaves this turn.]"
+            "\n[SCHEDULED TURN — this turn has NO output channel; it is dedicated to calling tools. "
+            "Nothing you write as your reply is delivered to anyone. To actually message or notify "
+            "someone, call send_message with the target channel.]"
         )
     return ctx
 
