@@ -261,7 +261,9 @@ class FastClassifier:
 
     async def _ask(self, system: str, user: str, max_tokens: int) -> str:
         assert self._client is not None  # guaranteed while enabled
-        resp = await self._client.chat.completions.create(
+        # No SDK retries: this call only runs on an already-failed turn, and the default two retries
+        # would stretch a hung classifier to 3×timeout before the seed line ships.
+        resp = await self._client.with_options(max_retries=0).chat.completions.create(
             model="local",
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             max_tokens=max_tokens,
