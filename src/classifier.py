@@ -60,6 +60,13 @@ _CONFIRM_TEMPLATES = [
     "Załatwione: {subject}.",
 ]
 
+# abstention_line(): two one-line prompts — name the language, then paraphrase in it.
+_LANG_PROMPT = "Name the language this message is written in — answer with its English name, one word only."
+_ABSTAIN_PROMPT = (
+    "Formulate a single short sentence that paraphrases all three similar-meaning sentences below, "
+    "in {lang} language — output only that sentence."
+)
+
 
 class ToolCall(BaseModel):
     name: str
@@ -231,6 +238,30 @@ class FastClassifier:
         bare = tc.name.split("__", 1)[-1]
         args = ", ".join(f"{k}={v}" for k, v in tc.arguments.items())
         return f"{bare}({args})" if args else bare
+
+    async def abstention_line(self, question: str) -> str:
+        """The agent's "I can't answer this" line, worded by the small model in ``question``'s language."""
+        lang = await self._ask(_LANG_PROMPT, question, 8)
+        lines = "\n".join(random.sample([
+            "Sorry, I couldn't produce a coherent response for this one.",
+            "I have to pass on this one — couldn't get to a verified answer.",
+            "I'll have to sit this one out — couldn't verify my response.",
+        ], 3))
+        sentence = await self._ask(_ABSTAIN_PROMPT.format(lang=lang), lines, 100)
+        logger.info(f"⚡ abstention line [{lang}] → {sentence!r}")
+        return sentence
+
+    async def _ask(self, system: str, user: str, max_tokens: int) -> str:
+        assert self._client is not None  # guaranteed while enabled
+        resp = await self._client.chat.completions.create(
+            model="local",
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            max_tokens=max_tokens,
+            temperature=0.3,  # variety comes from the random draw of 3 lines; higher only garbles the grammar
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            timeout=self._cfg.timeout_s,
+        )
+        return (resp.choices[0].message.content or "").strip()
 
     async def _classify(self, msg: InboundMessage) -> FastClassification:
         """Call the classifier model. Raises on any failure (caught by process())."""

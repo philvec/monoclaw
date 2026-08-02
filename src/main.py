@@ -70,6 +70,7 @@ async def main() -> None:
     # answer immediately (fast path) or pass through to the full agent.
     fast_classifier = FastClassifier(cfg.classifier, agent, mcp)
     fast_classifier.log_startup()
+    agent.attach_abstention_line(fast_classifier.abstention_line)  # same small model words the abstention
 
     async def on_message(msg: InboundMessage) -> None:
         try:

@@ -2,11 +2,11 @@ import asyncio
 import base64
 import json
 import mimetypes
-import random
 import re
 from datetime import datetime, timezone
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -221,15 +221,6 @@ def _with_images(messages: list[ChatCompletionMessageParam]) -> list[ChatComplet
     return out
 
 
-_MAX_REVIEWS_FALLBACK_MESSAGES = [
-    "Sorry, I couldn't produce a coherent response for this one. 🤷",
-    "I have to pass on this one — couldn't get to a verified answer. 🙈",
-    "I have to abstain here, sorry. 🫣",
-    "Can't give you a solid answer on this — I'll have to skip it. 😬",
-    "Sorry, no coherent result from me on this. 😅",
-    "I'll have to sit this one out — couldn't verify my response. 🪑",
-]
-
 _SCHEMA_INSTRUCTIONS = (
     "RESPONSE SCHEMA RULES:\n"
     "- justification: internal reasoning only, never shown to the user. "
@@ -349,6 +340,11 @@ class AgentLoop:
         self._pending_extract: asyncio.Task | None = None
         self._extract_cancel_count = 0
         self._pending_warm_reviewer: asyncio.Task | None = None
+        self._abstention_line: Any = None
+
+    def attach_abstention_line(self, writer: Any) -> None:
+        """Lend the agent the fast classifier's small model to word its abstention line."""
+        self._abstention_line = writer
 
     def _build_system_prompt(self) -> str:
         return (
@@ -739,7 +735,7 @@ class AgentLoop:
             if review_rejections >= MAX_NEGATIVE_REVIEWS:
                 logger.warning(f"🚫 max negative reviews ({MAX_NEGATIVE_REVIEWS}) reached, suppressing reply")
                 self._reviewer.archive_trail(messages[review_start_idx:])
-                fallback = random.choice(_MAX_REVIEWS_FALLBACK_MESSAGES)
+                fallback = await self._abstention_line(msg.text)
                 logger.warning(f"sending fallback to {msg.channel!r}: {fallback!r}")
                 try:
                     await self._channel_manager.send_full_msg(msg.channel, fallback)
@@ -752,7 +748,7 @@ class AgentLoop:
 
         # Safety net: if the loop exhausted retries on parse failures, client is still waiting
         if not turn_delivered and msg.channel != CRON_CHANNEL:
-            fallback = random.choice(_MAX_REVIEWS_FALLBACK_MESSAGES)
+            fallback = await self._abstention_line(msg.text)
             logger.warning(f"parse retries exhausted on {msg.channel!r}, sending fallback: {fallback!r}")
             try:
                 await self._channel_manager.send_full_msg(msg.channel, fallback)
