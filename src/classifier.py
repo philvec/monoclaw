@@ -66,6 +66,12 @@ _ABSTAIN_PROMPT = (
     "Formulate a single short sentence that paraphrases all three similar-meaning sentences below, "
     "in {lang} language — output only that sentence."
 )
+# Shuffled into the prompt above; also the verbatim reply if that model is unreachable.
+_ABSTAIN_SEEDS = [
+    "Sorry, I couldn't produce a coherent response for this one.",
+    "I have to pass on this one — couldn't get to a verified answer.",
+    "I'll have to sit this one out — couldn't verify my response.",
+]
 
 
 class ToolCall(BaseModel):
@@ -240,16 +246,18 @@ class FastClassifier:
         return f"{bare}({args})" if args else bare
 
     async def abstention_line(self, question: str) -> str:
-        """The agent's "I can't answer this" line, worded by the small model in ``question``'s language."""
-        lang = await self._ask(_LANG_PROMPT, question, 8)
-        lines = "\n".join(random.sample([
-            "Sorry, I couldn't produce a coherent response for this one.",
-            "I have to pass on this one — couldn't get to a verified answer.",
-            "I'll have to sit this one out — couldn't verify my response.",
-        ], 3))
-        sentence = await self._ask(_ABSTAIN_PROMPT.format(lang=lang), lines, 100)
-        logger.info(f"⚡ abstention line [{lang}] → {sentence!r}")
-        return sentence
+        """The agent's "I can't answer this" line, worded by the small model in ``question``'s language.
+        Never raises: the turn is already failing, so a seed line verbatim beats no reply at all."""
+        try:
+            lang = await self._ask(_LANG_PROMPT, question, 8)
+            lines = "\n".join(random.sample(_ABSTAIN_SEEDS, len(_ABSTAIN_SEEDS)))
+            if sentence := await self._ask(_ABSTAIN_PROMPT.format(lang=lang), lines, 100):
+                logger.info(f"⚡ abstention line [{lang}] → {sentence!r}")
+                return sentence
+            logger.error("⚡ abstention line came back empty — falling back to a seed")
+        except Exception as exc:
+            logger.error(f"⚡ abstention line failed, falling back to a seed: {exc}")
+        return random.choice(_ABSTAIN_SEEDS)
 
     async def _ask(self, system: str, user: str, max_tokens: int) -> str:
         assert self._client is not None  # guaranteed while enabled
