@@ -125,10 +125,19 @@ def _resolve_attachments(names: list[str]) -> tuple[list[str], list[str]]:
         if fname and not path.is_file():
             # read_image/download_image store a timestamp-prefixed copy ("<stamp>-black_square.png"),
             # but the model naturally attaches the name it knows ("black_square.png"). Accept that
-            # and resolve to the newest stored copy rather than rejecting a picture it really saw.
+            # when exactly one stored file matches, rather than rejecting a picture it really saw.
             matches = sorted(p.name for p in IMAGES_DIR.glob(f"*-{fname}") if p.is_file())
+            if len(matches) > 1:
+                # Every generate_image output ends "-generated.png", so this suffix is ambiguous far
+                # more often than not. Taking the newest silently sends a picture the model did not
+                # choose — the exact "it sent the same image again" failure. Make it disambiguate.
+                rejected.append(
+                    f"{raw} (ambiguous — {len(matches)} stored images end in '-{fname}'; "
+                    f"copy ONE of these EXACTLY instead: {matches[-10:]})"
+                )
+                continue
             if matches:
-                fname = matches[-1]
+                fname = matches[0]
                 path = IMAGES_DIR / fname
         if not fname or not path.is_file():
             rejected.append(f"{raw} (no such image — you may have invented the filename)")
