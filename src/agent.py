@@ -191,33 +191,46 @@ def _load_attachments(markers: list[str]) -> list[dict]:
 
 
 def _with_images(messages: list[ChatCompletionMessageParam]) -> list[ChatCompletionMessageParam]:
-    """Prompt-time only: expand the newest IMAGE_HISTORY_TURNS marker-bearing messages into content
-    parts. Returns a NEW list — `messages` and session history must stay str-only.
+    """Prompt-time only: expand '[IMAGE ...]' markers into content parts. Returns a NEW list —
+    `messages` and session history must stay str-only.
 
-    Tool results are expanded too: the Qwen chat template renders a tool message inside a user block,
-    so images are legal there, which is how read_image gets its picture into the context.
+    Two pools, because more than one visible picture degrades which one the model picks: history
+    contributes the newest IMAGE_HISTORY_TURNS *user* messages, and the turn being answered
+    contributes its newest tool message — that second pool is how read_image, and an image the
+    model just generated, get seen at all. Every older tool image stays marker text; the model
+    still attaches those by filename, and the reviewer expands the outbound candidate
+    unconditionally, so what actually ships is still checked against the picture.
+
+    Tool results are expandable at all because the Qwen chat template renders a tool message inside
+    a user block, so images are legal there.
     """
-    idxs = [
-        i
-        for i, m in enumerate(messages)
-        if m.get("role") in ("user", "tool")
-        and isinstance(c := m.get("content"), str)
-        and c.startswith(IMAGE_MARKER_PREFIX)
-    ]
+    last_user = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=-1)
+
+    def _markers(role: str, after: int) -> list[int]:
+        return [
+            i
+            for i, m in enumerate(messages)
+            if i > after
+            and m.get("role") == role
+            and isinstance(c := m.get("content"), str)
+            and c.startswith(IMAGE_MARKER_PREFIX)
+        ]
+
     out = list(messages)
-    expanded = 0
-    for i in reversed(idxs):
-        if expanded >= IMAGE_HISTORY_TURNS:
-            break
-        try:
-            parts = _expand_markers(str(messages[i]["content"]))
-            out[i] = {**messages[i], "content": parts}  # type: ignore[typeddict-item]
-        except OSError as exc:
-            # The marker is permanent history; a pruned or lost file must not brick every later turn.
-            # The model still sees the marker line, so nothing is silently fabricated.
-            logger.warning(f"image file missing for history[{i}], sending marker text only: {exc}")
-            continue
-        expanded += 1
+    for idxs, budget in ((_markers("user", -1), IMAGE_HISTORY_TURNS), (_markers("tool", last_user), 1)):
+        expanded = 0
+        for i in reversed(idxs):
+            if expanded >= budget:
+                break
+            try:
+                parts = _expand_markers(str(messages[i]["content"]))
+                out[i] = {**messages[i], "content": parts}  # type: ignore[typeddict-item]
+            except OSError as exc:
+                # The marker is permanent history; a pruned or lost file must not brick every later
+                # turn. The model still sees the marker line, so nothing is silently fabricated.
+                logger.warning(f"image file missing for history[{i}], sending marker text only: {exc}")
+                continue
+            expanded += 1
     return out
 
 
