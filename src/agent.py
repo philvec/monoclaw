@@ -813,10 +813,20 @@ class AgentLoop:
                 logger.warning(f"parse-exhaustion fallback delivery to {msg.channel!r} skipped: {exc}")
 
         # Persist turn to session history.
-        # Strip review trial: keep only the final accepted Answer (or a suppression note for MAX).
-        # Pre-review messages (ctx, user, tool calls) are always kept intact.
+        # Strip the review trial — the rejected Answer attempts and the reviewer's feedback — but
+        # KEEP the work done during it. The agent typically only calls its tools after a rejection,
+        # so discarding everything past the first Answer erased the tool call that the accepted
+        # answer rests on: 25 pictures were produced while history remembered one. History is
+        # few-shot context, so a run of answers claiming work with no tool call behind them teaches
+        # both the agent and the reviewer that this is the normal, accepted shape — which is how
+        # check (4) stopped firing. Tool results directly follow their assistant message, so
+        # filtering by shape keeps each call paired with its results.
         if review_start_idx >= 0:
-            pre_review = messages[1:review_start_idx]
+            pre_review = messages[1:review_start_idx] + [
+                m
+                for m in messages[review_start_idx:]
+                if m.get("role") == "tool" or (m.get("role") == "assistant" and m.get("tool_calls"))
+            ]
             if not review_accepted:
                 review_outcome: list[ChatCompletionMessageParam] = [
                     ChatCompletionUserMessageParam(
