@@ -254,7 +254,7 @@ _SCHEMA_INSTRUCTIONS = (
     "- message: the exact text delivered to the user. Write ONLY the direct answer — no preamble, "
     "no follow-up offers ('Is there anything else?'), no unsolicited suggestions. "
     "Unless the user explicitly asked for those, leave them out. Narration of what you are doing does not "
-    "belong here — it goes in the interim line below. "
+    "belong here — it goes in the one-line comment before each tool call. "
     "message reports what you ACTUALLY DID and found; it must never announce or promise work "
     "('Szukam w sieci…', 'zaraz sprawdzę', 'a potem napiszę skrypt'). If an action is still needed, call the "
     "tool FIRST and answer with its result — a message that narrates an action you did not perform this turn "
@@ -262,12 +262,6 @@ _SCHEMA_INSTRUCTIONS = (
     "message MUST NEVER be empty. Every turn gets an answer — there is no way to stay silent. If you could "
     "not do or find what was asked, say exactly that; if you have only a partial result, deliver it. An "
     "empty message is always a bug, never a choice.\n"
-    "INTERIM LINE — REQUIRED BEFORE EVERY TOOL CALL: before you use any tool, say what you are about to "
-    "do in exactly ONE short line of plain text (e.g. 'Szukam w sieci…', 'Piszę skrypt do policzenia "
-    "tego…'). The user sees it straight away. Applies to EVERY tool — searches, file writes, run_command "
-    "commands, memory reads alike. Exactly one line, never two, never the final answer — every time you "
-    "reach for a tool, not just the slow ones. Do NOT use send_message for this; it is fan-out only and "
-    "is refused for the input channel.\n"
     "Every response is reviewed. The reviewer verifies that every claim in the message is traceable to a "
     "specific cited source in the justification.\n"
     "TOOL POLICY: For questions about specific named entities (people, places, organisations, events), "
@@ -707,9 +701,8 @@ class AgentLoop:
                     ],
                 )
             else:
-                # The reviewer sees the pictures too. Without them it cannot verify a description of
-                # an image, falls back on "the claimed tool call is missing", and rejects every
-                # correct image answer — which then drove the agent into a doomed read_image hunt.
+                # The reviewer sees the pictures too. Denied the evidence it does not abstain — it
+                # falls back on "the claimed tool call is missing" and rejects correct descriptions.
                 # These are already delivered, so it judges the text against them; it cannot unsend.
                 review = await self._reviewer.run_review(
                     _with_images(messages, reel),

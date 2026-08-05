@@ -75,10 +75,10 @@ def sniff_image_mime(head: bytes) -> str:
     return ""
 
 
-IMAGE_HISTORY_TURNS = 1  # newest USER marker messages expanded into the prompt; older stay marker text
+IMAGE_HISTORY_TURNS = 1  # newest USER marker messages shown as pictures; older lose their marker line
 WS_MAX_FRAME_BYTES = 16 * 1024 * 1024  # base64 images exceed the websockets default (1 MB)
-# Raw bytes of all attachments on one outbound answer. base64 inflates by 4/3, and the whole
-# answer is ONE websocket frame — going over WS_MAX_FRAME_BYTES kills the channel mid-delivery.
+# Raw bytes of ONE outbound picture — each travels in its own message. base64 inflates by 4/3, and a
+# message is one websocket frame: going over WS_MAX_FRAME_BYTES kills the channel mid-delivery.
 OUTBOUND_IMAGES_MAX_TOTAL_BYTES = 8 * 1000 * 1000
 
 
