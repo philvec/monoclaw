@@ -40,26 +40,23 @@ _REVIEW_PROMPT = (
     "'I don't have access to X' requires the justification to cite the specific missing tool or data source. "
     "If the justification does not verifiably support a claim, mark is_correct=False regardless of how "
     "plausible or humble-sounding the message is. "
-    "(4) Tool call verification — TENSE DOES NOT MATTER. If the message or justification says a tool was, is "
-    "being, or is about to be used, verify that the corresponding tool call (role=assistant with tool_calls) AND "
-    "its result (role=tool) are actually present in THIS turn. This covers past ('I searched my memory', "
-    "'I checked the web'), present ('I am searching', 'Szukam w sieci', 'Wyszukuję'), AND future/promissory "
-    "('I will search', 'let me look', 'a potem napiszę', 'zaraz sprawdzę'). A delivered response must report what "
-    "was ACTUALLY DONE, never announce what is about to be done: the agent gets a separate interim line for "
-    "narration before a tool call, so a FINAL answer saying 'I am searching…' with no search in this turn is "
-    "fabricated. Likewise a justification written as intent ('I will first search, then write…') cites nothing "
-    "and is not acceptable. Mark is_correct=False and say in to_be_fixed: 'Call <tool> NOW, in this turn, and "
-    "answer with its actual result — do not announce or promise an action you have not performed.' "
+    "(4) Tool call verification — [ACTUALLY MADE TOOL CALLS THIS ROUND] is the authoritative list of tools "
+    "actually executed this turn; a tool absent from it was NOT called, regardless of what the history appears to show. "
+    "TENSE DOES NOT MATTER. If the message or justification says a tool was, is being, or is about to be used, "
+    "verify its name appears in [ACTUALLY MADE TOOL CALLS THIS ROUND]. A delivered response must report what was "
+    "ACTUALLY DONE, never announce what is about to be done: the agent gets a separate interim line for narration "
+    "before a tool call, so a FINAL answer saying 'I am searching…' with no entry in [ACTUALLY MADE TOOL CALLS "
+    "THIS ROUND] is fabricated. Likewise a justification written as intent ('I will first search, then write…') "
+    "cites nothing and is not acceptable. Mark is_correct=False and say in to_be_fixed: 'Call <tool> NOW, in this "
+    "turn, and answer with its actual result — do not announce or promise an action you have not performed.' "
     "(5) Web search for external facts: if the message states a fact about a specific named entity "
     "(person, place, organisation, event), current data (price, schedule, ranking, availability), "
     "or any time-sensitive claim that is NOT present in the system prompt and NOT backed by a cited memory entry, "
-    "verify that tools__web_search was called (role=assistant tool_calls containing web_search, "
-    "followed by a role=tool result). If the agent relied solely on training knowledge for such a claim "
-    "without searching, mark is_correct=False. "
+    "verify that tools__web_search appears in [ACTUALLY MADE TOOL CALLS THIS ROUND]. "
+    "If the agent relied solely on training knowledge for such a claim without searching, mark is_correct=False. "
     "(6) File modification claims: if the message claims a file was edited, written, modified, "
-    "updated, or created, verify that edit_file or write_file tool calls (role=assistant with "
-    "tool_calls) AND their results (role=tool) are present in THIS same turn. If those tool "
-    "calls are absent, mark is_correct=False and include in to_be_fixed: 'Call edit_file (or "
+    "updated, or created, verify that edit_file or write_file appears in [ACTUALLY MADE TOOL CALLS THIS ROUND]. "
+    "If absent, mark is_correct=False and include in to_be_fixed: 'Call edit_file (or "
     "write_file) in your next tool-use turn — do NOT claim the modification without a tool "
     "result confirming it; rewording the claim without calling the tool will be rejected again.' "
     "(7) Post-rejection evasion: if the conversation contains a [REVIEW — is_correct=False] message "
@@ -137,6 +134,7 @@ class Reviewer:
         justification: str = "",
         attachment_parts: list[Any] | None = None,
         current_request: str = "",
+        called_tool_names: list[str] | None = None,
     ) -> Review:
         review_msgs = self._build_review_prefix(messages)
         assistant_content = str(assistant_msg.get("content") or "")
@@ -150,11 +148,13 @@ class Reviewer:
         # The justification lives only on the parsed Answer and is never part of `messages`. Without
         # it the reviewer — whose whole job is auditing it — sees nothing and rejects for "missing
         # justification" on a response that supplied one, which the agent then cannot fix.
+        tool_list_str = "[" + ", ".join(called_tool_names) + "]" if called_tool_names else "(none)"
         review_msgs.append(
             ChatCompletionUserMessageParam(
                 role="user",
                 content=f"[CURRENT REQUEST — history above is context; this is what the response "
                 f"must answer]\n{ask}\n\n"
+                f"[ACTUALLY MADE TOOL CALLS THIS ROUND: {tool_list_str}]\n\n"
                 f"[ASSISTANT JUSTIFICATION]\n{justification or '(none provided)'}\n\n"
                 f"[ASSISTANT RESPONSE TO REVIEW]\n{assistant_content}",
             )

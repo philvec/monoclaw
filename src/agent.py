@@ -695,6 +695,7 @@ class AgentLoop:
                     initial_answer.justification,
                     attachment_parts=_expand_markers("\n".join(att_markers)) if att_markers else None,
                     current_request=msg.text,
+                    called_tool_names=sorted(tool_counts.keys()) or None,
                 )
                 if review.is_correct and att_rejected:
                     avail = _available_attachments(messages)
