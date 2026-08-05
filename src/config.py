@@ -92,7 +92,12 @@ OUTBOUND_IMAGES_MAX_TOTAL_BYTES = 8 * 1000 * 1000
 class LLMConfig(BaseModel):
     base_url: str = "http://localhost:8080/v1"
     embeddings_url: str = ""  # separate embedding server; falls back to base_url if empty
-    max_tokens: int = 4096
+    # Phase 1 still thinks, and reasoning is billed here while landing in reasoning_content — so at
+    # 4096 it twice spent ~2min and returned "0 content chars, 0 tool call(s)", losing the tool call
+    # it was about to make. Well inside the 65536 the server is started with. If truncation returns
+    # at this budget the answer is no thinking on phase 1, not a bigger number: 8192 tokens of
+    # reasoning for one edit_image call is looping, not thinking.
+    max_tokens: int = 8192
     max_context: int = 32768  # practical context limit for compaction (0 = use model's reported window)
     max_history_messages: int = 100  # also triggers compaction when history exceeds this many messages
     compaction_keep_ratio: float = 0.25  # fraction of history to keep after compaction (rest is summarized)
