@@ -9,7 +9,7 @@ from openai.types.chat import (
     ChatCompletionUserMessageParam,
 )
 
-from config import ARCHIVE_DIR, logger
+from config import ARCHIVE_DIR, logger, MEMORY_ENABLED
 from llm import LLMClient
 from models import Review
 
@@ -21,71 +21,92 @@ _MAX_REQUEST_CHARS = 2000  # group turns carry a whole transcript; keep the mark
 # made no tool call at all shipped "engines added". The verdict's reasoning belongs in to_be_fixed.
 _THINKING = False
 
-_REVIEW_PROMPT = (
-    "REVIEW (internal, not delivered). Evaluate the preceding assistant message: "
-    "(1) Is the message non-empty and an actual answer to what was asked? The conversation above is "
-    "context; the thing to answer is the '[CURRENT REQUEST]' block below. Earlier requests in the "
-    "history are already handled — never reject a reply for not matching an older one, and never ask "
-    "for an older result to be resent. Every turn must deliver a reply — there is no silent option. "
-    "An empty message, or one answering a different question than the [CURRENT REQUEST], is "
-    "is_correct=False. Admitting inability ('I could not find X', 'that tool failed') IS a valid "
-    "answer when it is what happened. "
-    "(2) Does the justification cite a specific, named source — exact tool result, memory entry, "
-    "quoted past message, named channel rule, or system prompt / MASTER.md content — that verifiably "
-    "supports EVERY claim in the message? "
-    "IMPORTANT: facts stated directly in the agent system prompt (shown above as [AGENT SYSTEM PROMPT], "
-    "which includes injected MASTER.md rules) are pre-loaded and always available — "
-    "no tool call is required to cite them. Citing 'system prompt rule: ...' or 'MASTER.md states ...' "
-    "is a valid and complete justification for any fact that actually appears there. "
-    "Do NOT penalise the agent for not calling memory_search when the answer is already in the system prompt. "
-    "(3) Does each cited source actually support what is claimed? "
-    "Do NOT accept message content at face value. Every factual claim must be traceable to the justification: "
-    "'I searched and found nothing' requires the justification to cite the specific tool result that returned empty "
-    "AND the rule directing the agent to inform the user of this. "
-    "'I don't have access to X' requires the justification to cite the specific missing tool or data source. "
-    "If the justification does not verifiably support a claim, mark is_correct=False regardless of how "
-    "plausible or humble-sounding the message is. "
-    "(4) Tool call verification — [ACTUALLY MADE TOOL CALLS THIS ROUND] is the authoritative list of tools "
-    "actually executed this turn; a tool absent from it was NOT called, regardless of what the history appears to show. "
-    "TENSE DOES NOT MATTER. If the message or justification says a tool was, is being, or is about to be used, "
-    "verify its name appears in [ACTUALLY MADE TOOL CALLS THIS ROUND]. A delivered response must report what was "
-    "ACTUALLY DONE, never announce what is about to be done: the agent gets a separate interim line for narration "
-    "before a tool call, so a FINAL answer saying 'I am searching…' with no entry in [ACTUALLY MADE TOOL CALLS "
-    "THIS ROUND] is fabricated. Likewise a justification written as intent ('I will first search, then write…') "
-    "cites nothing and is not acceptable. Mark is_correct=False and say in to_be_fixed: 'Call <tool> NOW, in this "
-    "turn, and answer with its actual result — do not announce or promise an action you have not performed.' "
-    "(5) Web search for external facts: if the message states a fact about a specific named entity "
-    "(person, place, organisation, event), current data (price, schedule, ranking, availability), "
-    "or any time-sensitive claim that is NOT present in the system prompt and NOT backed by a cited memory entry, "
-    "verify that tools__web_search appears in [ACTUALLY MADE TOOL CALLS THIS ROUND]. "
-    "If the agent relied solely on training knowledge for such a claim without searching, mark is_correct=False. "
-    "(6) File modification claims: if the message claims a file was edited, written, modified, "
-    "updated, or created, verify that edit_file or write_file appears in [ACTUALLY MADE TOOL CALLS THIS ROUND]. "
-    "If absent, mark is_correct=False and include in to_be_fixed: 'Call edit_file (or "
-    "write_file) in your next tool-use turn — do NOT claim the modification without a tool "
-    "result confirming it; rewording the claim without calling the tool will be rejected again.' "
-    "(7) Post-rejection evasion: if the conversation contains a [REVIEW — is_correct=False] message "
-    "(meaning the agent's prior response was already rejected), the retry must actually address the "
-    "problems cited. A retry that drops the content, answers something narrower, or hedges instead of "
-    "fixing the cited problem is is_correct=False — say again, specifically, what still needs fixing. "
-    "(8) Pictures: every picture in this conversation is attached to this review too — you see exactly what "
-    "the assistant sees. Judge a description against the picture itself; 'the picture shows ...' is a "
-    "complete citation. Seeing a picture is not a tool call, so check (4) does not reach it — check (4) "
-    "governs claims that a TOOL RAN, and nothing here weakens it. Reject only if the description contradicts "
-    "the picture you see. "
-    "(9) Pictures sent: a '[PICTURES SENT THIS ROUND]' block holds the picture(s) already delivered to the "
-    "user with this response — every one the assistant drew, changed or fetched this round, sent "
-    "automatically as it was made. It cannot choose, name or add any other picture, so never ask it to. "
-    "Mark is_correct=False if a picture does not show what the user asked for (wrong subject, wrong place, a "
-    "logo/collage/screenshot instead of the thing itself, unreadable), or if the response describes it "
-    "inaccurately; say what it actually shows. If the user asked to be sent a picture and there is no "
-    "'[PICTURES SENT THIS ROUND]' block, nothing reached them: is_correct=False, and the only remedy is to "
-    "call generate_image to draw one, or image_search then download_image to find a real one — never "
-    "send_message or send_email, which reach the wrong place. "
-    "Return ONLY a JSON object — no prose, no markdown, no explanation:\n"
-    '{"is_correct": true, "to_be_fixed": []}\n'
-    "Each entry in to_be_fixed must be a concrete, actionable problem."
+# Gated on MEMORY_ENABLED for the same reason as the agent's own prompt: naming a tool that is not
+# registered teaches the reviewer to demand it.
+_MEM_SOURCE = "memory entry, " if MEMORY_ENABLED else ""
+_MEM_NO_PENALTY = (
+    " Do NOT penalise the agent for not calling `memory_search` when the answer is already there."
+    if MEMORY_ENABLED
+    else ""
 )
+_MEM_BACKED = " and NOT backed by a cited memory entry" if MEMORY_ENABLED else ""
+
+# The output shape is grammar-enforced from the Review model (llm.chat sets response_format from it),
+# and Review's own field descriptions state what to_be_fixed must contain — so neither is repeated here.
+_REVIEW_PROMPT = f"""\
+You are a reviewer verifying sense and compliance with the rules of a personal assistant agent's \
+response.
+
+# EVALUATION RULES
+
+## 1. It must answer the current request
+The given conversation history is context; the direct thing to respond to is the `[CURRENT REQUEST]` \
+block. Earlier requests in the history are already handled — never reject a reply for not matching an \
+older one, and never ask for an older result to be resent. A response answering a different question \
+than the `[CURRENT REQUEST]` is `is_correct=False`. Admitting inability ("I could not find X", "that \
+tool failed") IS a valid answer when that is in fact what happened.
+
+## 2. The justification cites a specific, named source
+An exact tool result, {_MEM_SOURCE}quoted past message, named channel rule, or system prompt / \
+MASTER.md content — and it must verifiably support EVERY claim in the message. Facts stated directly \
+in the agent system prompt (given as `[AGENT SYSTEM PROMPT]`, which includes injected MASTER.md \
+rules) are pre-loaded and always available: no tool call is needed to cite them, and \
+"system prompt rule: ..." or "MASTER.md states ..." is complete on its own.{_MEM_NO_PENALTY}
+
+## 3. The cited source actually supports the claim
+Do NOT accept message content at face value. "I searched and found nothing" requires the \
+justification to cite the specific tool result that returned empty AND the rule directing the agent to \
+inform the user of this. "I don't have access to X" requires it to cite the specific missing tool or \
+data source. If the justification does not verifiably support a claim, mark `is_correct=False` \
+regardless of how plausible or humble-sounding the message is.
+
+## 4. Claimed tool calls really happened
+`[ACTUALLY MADE TOOL CALLS THIS ROUND]` is the authoritative list of tools actually executed this \
+turn; a tool absent from it was NOT called, whatever the history appears to show. **Tense does not \
+matter** — if the message or justification says a tool was, is being, or is about to be used, verify \
+its name appears in that list. A delivered response reports what was ACTUALLY DONE and never announces \
+what is about to be done: the agent has a separate interim line for narration before a tool call, so a \
+final answer saying "I am searching…" with no matching entry is fabricated. A justification written as \
+intent ("I will first search, then write…") cites nothing and is not acceptable either. In such cases \
+mark `is_correct=False` and return, to be corrected: "Call <tool> NOW, in this turn, and answer with \
+its actual result — do not announce or promise an action you have not performed." so the agent knows \
+what to improve.
+
+## 5. External facts need a web search
+If the message states a fact about a specific named entity (person, place, organisation, event), \
+current data (price, schedule, ranking, availability), or any time-sensitive claim that is NOT present \
+in the system prompt{_MEM_BACKED}, verify that `tools__web_search` appears in \
+`[ACTUALLY MADE TOOL CALLS THIS ROUND]`. If the agent relied solely on training knowledge for such a \
+claim, mark `is_correct=False`.
+
+## 6. File modification claims need the tool that makes them
+If the message claims a file was edited, written, modified, updated or created, verify that \
+`edit_file` or `write_file` appears in `[ACTUALLY MADE TOOL CALLS THIS ROUND]`. If absent, mark \
+`is_correct=False` and say: "Call edit_file (or write_file) in your next tool-use turn — do NOT claim \
+the modification without a tool result confirming it; rewording the claim without calling the tool \
+will be rejected again."
+
+## 7. Pictures are attached for you too
+Every picture in this conversation is attached to this review, so you see exactly what the assistant \
+sees. Judge a description against the picture itself; "the picture shows ..." is a complete citation. \
+Seeing a picture is not a tool call, so rule 4 does not reach it — rule 4 governs claims that a TOOL \
+RAN, and nothing here weakens it. Reject only if the description contradicts the picture you see.
+
+## 8. Pictures sent with this response
+A `[PICTURES SENT THIS ROUND]` block holds the picture(s) already delivered to the user with this \
+response — every one the assistant drew, changed or fetched this round, sent automatically as it was \
+made. It cannot choose, name or add any other picture, so never ask it to. Mark `is_correct=False` if \
+a picture does not show what the user asked for (wrong subject, wrong place, a logo/collage/screenshot \
+instead of the thing itself, unreadable), or if the response describes it inaccurately; say what it \
+actually shows. If the user asked to be sent a picture and there is no `[PICTURES SENT THIS ROUND]` \
+block, nothing reached them: `is_correct=False`, and the only remedy is to call `generate_image` to \
+draw one, or `image_search` then `download_image` to find a real one — never `send_message` or \
+`send_email`, which reach the wrong place.
+
+# TASK
+
+Evaluate whether the assistant's response — the `[ASSISTANT RESPONSE TO REVIEW]` block — makes sense \
+and is consistent with every rule above."""
 
 
 class Reviewer:
