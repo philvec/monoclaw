@@ -130,11 +130,12 @@ class LLMClient:
             return LLMResponse(content="", finish_reason="error", error=str(exc))
 
         result = self._parse_chunks(chunks)
-        if result.finish_reason == "length":
+        if result.finish_reason == "length" and kwargs["max_tokens"] > 1:
             # Otherwise invisible: a cut-off tool call simply vanishes, and a cut-off JSON body
             # leaves content empty, which reads downstream as a plain "parse failure". Reasoning
             # counts against this budget but lands in reasoning_content, so a think block alone can
-            # consume it and return nothing at all.
+            # consume it and return nothing at all. max_tokens=1 is the cache-warm call, where
+            # stopping on length is the entire point.
             logger.warning(
                 f"⚠️ truncated at max_tokens={kwargs['max_tokens']} — "
                 f"{len(result.content)} content chars, {len(result.tool_calls)} tool call(s)"
