@@ -569,16 +569,19 @@ class AgentLoop:
                     def _trunc(v: object, n: int = 30) -> str:
                         s = json.dumps(v) if not isinstance(v, str) else v
                         return s if len(s) <= n else s[:n] + "..."
+                    # Signature over the model's OWN arguments, taken BEFORE injection: an injected
+                    # source is not a choice it made, and it necessarily differs on every chained
+                    # edit because each edit replaces the reel top with its own output. Counting it
+                    # made _REPEATED_CALL_LIMIT unreachable for edit_image — the same instruction
+                    # ran three times and all three pictures were sent to the user.
+                    sig = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True, default=str)}"
                     if is_edit := (tc.name.rsplit("__", 1)[-1] == EDIT_IMAGE_TOOL):
                         # Overwrite unconditionally: `definitions` hides this parameter from the
                         # model, so any value present is imitation of old history rather than a
-                        # choice it gets to make. Resolved before `sig` so an edit CHAIN counts as
-                        # progress — the source differs each time — while re-editing the same
-                        # picture with the same prompt still trips the repeat guard.
+                        # choice it gets to make.
                         tc.arguments = {**(tc.arguments or {}), "image_filename": _newest_image(reel, messages)}
                     args_preview = "{" + ", ".join(f"{k}: {_trunc(v)}" for k, v in (tc.arguments or {}).items()) + "}"
                     logger.info(f"🔧 tool call: {tc.name!r} args={args_preview}")
-                    sig = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True, default=str)}"
                     call_counts[sig] = call_counts.get(sig, 0) + 1
                     tool_counts[tc.name] = tool_counts.get(tc.name, 0) + 1
                     if tool_counts[tc.name] > _TOOL_CALLS_PER_TURN_LIMIT:
