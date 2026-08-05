@@ -65,6 +65,26 @@ class Tool(ABC, Generic[P]):
         }
 
 
+EDIT_IMAGE_TOOL = "edit_image"  # bare MCP name; the server prefix ("tools__") is configurable
+
+
+def _hide_edit_source(schema: dict) -> dict:
+    """Model-facing copy of an MCP schema with edit_image's source filename removed.
+
+    Naming a stored file is the one thing this model cannot do — given the parameter it passed the
+    docstring's own example filename, then invented timestamps. The agent resolves the source from
+    the reel instead; the MCP tool still declares it, because that is what opens the file. Copy-on-
+    write: these dicts are also handed to the fast classifier via MCPClient.schemas_for().
+    """
+    fn = schema["function"]
+    if fn["name"].rsplit("__", 1)[-1] != EDIT_IMAGE_TOOL:
+        return schema
+    params = dict(fn.get("parameters") or {})
+    params["properties"] = {k: v for k, v in (params.get("properties") or {}).items() if k != "image_filename"}
+    params["required"] = [r for r in (params.get("required") or []) if r != "image_filename"]
+    return {**schema, "function": {**fn, "parameters": params}}
+
+
 class ToolRegistry:
     """Registry of available tools; dispatches execution by name."""
 
@@ -88,7 +108,7 @@ class ToolRegistry:
         registry = cls()
         tools: list[Tool[Any]] = [
             ReadFileTool(cfg),
-            ReadImageTool(cfg),
+            ReadImageFileTool(cfg),
             DownloadImageTool(cfg),
             WriteFileTool(cfg),
             EditFileTool(cfg),
@@ -120,7 +140,7 @@ class ToolRegistry:
 
     @property
     def definitions(self) -> list[dict]:
-        return [t.to_schema() for t in self._tools.values()] + self._mcp_schemas
+        return [t.to_schema() for t in self._tools.values()] + [_hide_edit_source(s) for s in self._mcp_schemas]
 
     async def execute(self, name: str, arguments: dict) -> str:
         if name == "send_message" and self.current_channel is not None:
@@ -193,9 +213,9 @@ class ReadFileTool(Tool["ReadFileTool.Params"]):
         return "\n".join(f"{start + i + 1}\t{line}" for i, line in enumerate(chunk))
 
 
-class ReadImageTool(Tool["ReadImageTool.Params"]):
-    """Look at an image file in the workspace. The filename it returns goes in Answer.attachments
-    to send that image to the user."""
+class ReadImageFileTool(Tool["ReadImageFileTool.Params"]):
+    """Load a picture file from the workspace so you can see it — e.g. one a script you just ran
+    produced."""
 
     # mtmd decodes via stb_image; IMAGE_MIME_EXT is the single source of truth for what we handle.
     _MIMES = set(IMAGE_MIME_EXT)
@@ -206,15 +226,7 @@ class ReadImageTool(Tool["ReadImageTool.Params"]):
     async def execute(self, params: Params) -> str:  # type: ignore[override]
         target = _safe_path(params.path)
         if not target.is_file():
-            # A "[IMAGE <file> <mime>]" marker names a stored image, not a workspace file. The model
-            # does sometimes reference one anyway; resolve it instead of hard-failing.
-            stored = IMAGES_DIR / Path(params.path).name  # basename only — must not escape IMAGES_DIR
-            if not stored.is_file():
-                return f"image not found: {params.path}"
-            # Already stored, and already attached to the message it came from: re-showing it would
-            # duplicate the picture in context for no gain.
-            stored_mime = mimetypes.guess_type(stored.name)[0] or sniff_image_mime(stored.read_bytes()[:16])
-            return f"[IMAGE {stored.name} {stored_mime or 'image/jpeg'}]"
+            return f"image not found: {params.path}"
         mime = mimetypes.guess_type(target.name)[0] or ""
         if mime not in self._MIMES:
             mime = sniff_image_mime(target.read_bytes()[:16])  # e.g. .webp is absent from mimetypes
@@ -230,17 +242,14 @@ class ReadImageTool(Tool["ReadImageTool.Params"]):
         stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
         fname = f"{stamp}-{target.stem}{IMAGE_MIME_EXT.get(mime) or '.img'}"
         (IMAGES_DIR / fname).write_bytes(data)
-        logger.info(f"🖼️ read_image: {params.path} → {fname}")
-        # Marker must lead — agent._expand_markers only treats leading lines as image markers.
-        return (
-            f"[IMAGE {fname} {mime}]\n(showing {params.path})\n"
-            f'To send this file to the user, set attachments to ["{fname}"] — exactly that string.'
-        )
+        logger.info(f"🖼️ read_image_file: {params.path} → {fname}")
+        # Marker must lead — agent._expand_markers only treats leading lines as image markers, and
+        # strips them before the model sees the text.
+        return f"[IMAGE {fname} {mime}]\n(showing {params.path})"
 
 
 class DownloadImageTool(Tool["DownloadImageTool.Params"]):
-    """Download an image from an http(s) URL and look at it. The filename it returns goes in
-    Answer.attachments to send that image to the user."""
+    """Download a picture from an http(s) URL and look at it."""
 
     _MAX_BYTES = 8_000_000
 
@@ -252,13 +261,13 @@ class DownloadImageTool(Tool["DownloadImageTool.Params"]):
             # Observed: the model reaches here with file:///workspace/x.png or a localhost URL when it
             # wants to show a file it just made. Name the right tool instead of just refusing.
             return (
-                f"error: not an http(s) url: {params.url!r}. Use read_image for a workspace file."
+                f"error: not an http(s) url: {params.url!r}. Use read_image_file for a workspace file."
             )
         async with httpx.AsyncClient(follow_redirects=True, max_redirects=5) as client:
             resp = await client.get(params.url, timeout=20.0, headers={"User-Agent": "monoclaw/1.0"})
             resp.raise_for_status()
             mime = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-            if mime not in ReadImageTool._MIMES:
+            if mime not in ReadImageFileTool._MIMES:
                 return f"error: {params.url} is {mime or 'unknown type'}, not a supported image"
             if len(resp.content) > self._MAX_BYTES:
                 return f"error: image is {len(resp.content) / 1e6:.1f} MB (limit {self._MAX_BYTES / 1e6:.0f} MB)"
@@ -272,13 +281,9 @@ class DownloadImageTool(Tool["DownloadImageTool.Params"]):
         fname = f"{stamp}-fetched{IMAGE_MIME_EXT.get(mime) or '.img'}"
         (IMAGES_DIR / fname).write_bytes(data)
         logger.info(f"🖼️ download_image: {params.url} → {fname} ({len(data) / 1e3:.0f} kB)")
-        # Marker must lead — agent._expand_markers only treats leading lines as image markers.
-        # The exact attachments value is spelled out because the model otherwise invents a
-        # descriptive filename ("wawel-castle-krakow.jpg") instead of copying this opaque one.
-        return (
-            f"[IMAGE {fname} {mime}]\n(fetched from {params.url})\n"
-            f'To send this picture, set attachments to ["{fname}"] — exactly that string, do not rename it.'
-        )
+        # Marker must lead — agent._expand_markers only treats leading lines as image markers, and
+        # strips them before the model sees the text.
+        return f"[IMAGE {fname} {mime}]\n(fetched from {params.url})"
 
 
 class WriteFileTool(Tool["WriteFileTool.Params"]):

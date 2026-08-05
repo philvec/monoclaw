@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import json
-import mimetypes
 import re
 from datetime import datetime, timezone
 
@@ -25,7 +24,6 @@ from config import (
     IMAGES_DIR,
     LLM_IMAGE_MIMES,
     OUTBOUND_IMAGES_MAX_TOTAL_BYTES,
-    sniff_image_mime,
     to_decodable_image,
     logger,
     MAX_STORED_MSG_CHARS,
@@ -42,7 +40,7 @@ from openai.types.chat import (
     ChatCompletionUserMessageParam,
 )
 from openai.types.chat.chat_completion_message_tool_call_param import ChatCompletionMessageToolCallParam
-from tools import ToolRegistry
+from tools import EDIT_IMAGE_TOOL, ToolRegistry
 
 _MAX_TOOL_ITERATIONS = 20
 _REPEATED_CALL_LIMIT = 2  # identical (name, args) executions per turn before the call is refused
@@ -85,8 +83,22 @@ def _persist_user_content(msg: InboundMessage) -> str:
     return "\n".join(markers + notes + ([msg.text] if msg.text else []))
 
 
+def _strip_markers(content: str) -> str:
+    """Content with its leading '[IMAGE ...]' lines removed — the part the model may read.
+
+    A filename is transport, never something the model handles: shown one it copies a neighbouring
+    name or invents a variant of it. Pictures reach it as pictures; edit_image's source and the
+    outbound attachments are resolved from the reel instead.
+    """
+    lines = content.split("\n")
+    n = 0
+    while n < len(lines) and _IMAGE_MARKER.match(lines[n]):
+        n += 1
+    return "\n".join(lines[n:]).strip()
+
+
 def _expand_markers(content: str) -> list[ChatCompletionContentPartParam]:
-    """Leading '[IMAGE ...]' marker lines → image parts; the content verbatim → one text part."""
+    """Leading '[IMAGE ...]' marker lines → image parts; what _strip_markers leaves → one text part."""
     parts: list[ChatCompletionContentPartParam] = []
     rest: list[str] = []
     for line in content.split("\n"):
@@ -102,67 +114,45 @@ def _expand_markers(content: str) -> list[ChatCompletionContentPartParam]:
                 image_url={"url": f"data:{m.group(2)};base64,{base64.b64encode(data).decode('ascii')}"},
             )
         )
-    # Keep the marker lines in the text as well. Expansion is the only place the model could read a
-    # picture's filename, so consuming them left it unable to name an image the user sent: it passed
-    # invented names to edit_image and attachments. Markers are strictly leading, so `content` is
-    # already exactly those lines followed by `rest`.
-    if text := content.strip():
+    if text := _strip_markers(content):
         parts.append(ChatCompletionContentPartTextParam(type="text", text=text))
     return parts
 
 
-def _resolve_attachments(names: list[str]) -> tuple[list[str], list[str]]:
-    """Answer.attachments → (marker lines, rejected names).
+def _newest_image(reel: list[str], messages: list[ChatCompletionMessageParam]) -> str:
+    """Filename edit_image should work on: the reel top, else the newest picture the user sent.
 
-    The model supplies these filenames, so treat them as untrusted: basename only (never escape
-    IMAGES_DIR) and the file must already exist there — i.e. it must be a picture the model was
-    actually shown this conversation, not one it invented.
+    That second case is exactly the message _with_images embeds, so "what it edits" is always "what
+    it can see". Returns "" when there is nothing — the caller must then refuse rather than pass a
+    name onward, because a tool that cannot open it would quote it back in an error.
     """
-    markers: list[str] = []
-    rejected: list[str] = []
-    budget = OUTBOUND_IMAGES_MAX_TOTAL_BYTES
-    for raw in names[:MAX_OUTBOUND_ATTACHMENTS]:
-        # tolerate the model echoing a whole "[IMAGE <file> <mime>]" marker instead of the filename
-        m = _IMAGE_MARKER.match(raw.strip())
-        fname = Path(m.group(1) if m else raw.strip()).name
-        path = IMAGES_DIR / fname
-        if fname and not path.is_file():
-            # read_image/download_image store a timestamp-prefixed copy ("<stamp>-black_square.png"),
-            # but the model naturally attaches the name it knows ("black_square.png"). Accept that
-            # when exactly one stored file matches, rather than rejecting a picture it really saw.
-            matches = sorted(p.name for p in IMAGES_DIR.glob(f"*-{fname}") if p.is_file())
-            if len(matches) > 1:
-                # Every generate_image output ends "-generated.png", so this suffix is ambiguous far
-                # more often than not. Taking the newest silently sends a picture the model did not
-                # choose — the exact "it sent the same image again" failure. Make it disambiguate.
-                rejected.append(
-                    f"{raw} (ambiguous — {len(matches)} stored images end in '-{fname}'; "
-                    f"copy ONE of these EXACTLY instead: {matches[-10:]})"
-                )
+    line = reel[-1] if reel else ""
+    if not line:
+        for m in reversed(messages):
+            if m.get("role") != "user" or not isinstance(c := m.get("content"), str):
                 continue
-            if matches:
-                fname = matches[0]
-                path = IMAGES_DIR / fname
-        if not fname or not path.is_file():
-            rejected.append(f"{raw} (no such image — you may have invented the filename)")
-            continue
-        mime = mimetypes.guess_type(fname)[0] or ""
-        if mime not in LLM_IMAGE_MIMES:
-            mime = sniff_image_mime(path.read_bytes()[:16])
-        # Guard for stragglers stored before conversion existed: the reviewer has to render this,
-        # and an undecodable one would 400 the whole review.
-        if mime not in LLM_IMAGE_MIMES:
-            rejected.append(f"{raw} (unsupported image format)")
-            continue
-        size = path.stat().st_size
-        if size > budget:
-            # base64 inflates by 4/3, and the whole answer travels as ONE websocket frame: exceeding
-            # the negotiated limit kills the channel mid-delivery instead of just dropping a picture.
-            rejected.append(f"{raw} (too large: {size / 1e6:.1f} MB, over the per-message budget)")
-            continue
-        budget -= size
-        markers.append(f"{IMAGE_MARKER_PREFIX}{fname} {mime}]")
-    return markers, rejected
+            if found := [ln for ln in c.split("\n") if _IMAGE_MARKER.match(ln)]:
+                line = found[-1]
+                break
+    if (mm := _IMAGE_MARKER.match(line)) is None:
+        return ""
+    fname = Path(mm.group(1)).name  # basename only — this string opens a file on the tools side
+    return fname if (IMAGES_DIR / fname).is_file() else ""
+
+
+def _deliverable(marker: str) -> bool:
+    """Whether this picture can go out as its own message.
+
+    base64 inflates by 4/3 and one message is one websocket frame, so an oversized attachment kills
+    the channel mid-delivery instead of just failing to send.
+    """
+    m = _IMAGE_MARKER.match(marker)
+    if m is None:
+        return False
+    path = IMAGES_DIR / Path(m.group(1)).name
+    if not path.is_file() or m.group(2) not in LLM_IMAGE_MIMES:
+        return False
+    return path.stat().st_size <= OUTBOUND_IMAGES_MAX_TOTAL_BYTES
 
 
 def _request_preview(text: str, limit: int = 2000) -> str:
@@ -172,21 +162,6 @@ def _request_preview(text: str, limit: int = 2000) -> str:
     return one_line if len(one_line) <= limit else one_line[:limit] + "… [truncated]"
 
 
-def _available_attachments(messages: list[ChatCompletionMessageParam]) -> list[str]:
-    """Marker filenames present in this turn — the only names that may legitimately be attached.
-    Used to make a rejection actionable: the model reliably invents a descriptive filename
-    ('wawel-castle-krakow.jpg') instead of copying the opaque stored one, so tell it the real ones."""
-    seen: list[str] = []
-    for m in messages:
-        content = m.get("content")
-        if not isinstance(content, str):
-            continue
-        for line in content.split("\n"):
-            if (mm := _IMAGE_MARKER.match(line)) and mm.group(1) not in seen:
-                seen.append(mm.group(1))
-    return seen
-
-
 def _load_attachments(markers: list[str]) -> list[dict]:
     """Marker lines → wire payloads for the outbound frame."""
     out: list[dict] = []
@@ -194,7 +169,12 @@ def _load_attachments(markers: list[str]) -> list[dict]:
         m = _IMAGE_MARKER.match(line)
         if m is None:
             continue
-        data = (IMAGES_DIR / Path(m.group(1)).name).read_bytes()
+        try:
+            data = (IMAGES_DIR / Path(m.group(1)).name).read_bytes()
+        except OSError as exc:
+            # A vanished file must cost the picture, not the whole reply it travels with.
+            logger.warning(f"attachment unreadable, sending without it: {exc}")
+            continue
         out.append({
             "mime": m.group(2),
             "data": base64.b64encode(data).decode("ascii"),
@@ -203,23 +183,27 @@ def _load_attachments(markers: list[str]) -> list[dict]:
     return out
 
 
-def _with_images(messages: list[ChatCompletionMessageParam]) -> list[ChatCompletionMessageParam]:
+def _with_images(
+    messages: list[ChatCompletionMessageParam], reel: list[str] | None = None
+) -> list[ChatCompletionMessageParam]:
     """Prompt-time only: expand '[IMAGE ...]' markers into content parts. Returns a NEW list —
     `messages` and session history must stay str-only.
 
-    Two pools, because more than one visible picture degrades which one the model picks: history
-    contributes the newest IMAGE_HISTORY_TURNS *user* messages, and the turn being answered
-    contributes its newest tool message — that second pool is how read_image, and an image the
-    model just generated, get seen at all. Every older tool image stays marker text; the model
-    still attaches those by filename, and the reviewer expands the outbound candidate
-    unconditionally, so what actually ships is still checked against the picture.
+    Two pools: history contributes the newest IMAGE_HISTORY_TURNS *user* messages, and the turn
+    being answered contributes its reel — the pictures it made, which is how read_image_file and a
+    just-generated image get seen at all. Selecting by reel rather than "newest tool message" is
+    what keeps an edited picture from appearing beside the source it replaced.
+
+    Whatever is left unexpanded then has its marker lines stripped: that text is the last place a
+    filename could still be read, and _strip_markers says why it must not be.
 
     Tool results are expandable at all because the Qwen chat template renders a tool message inside
     a user block, so images are legal there.
     """
+    reel = reel or []
     last_user = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=-1)
 
-    def _markers(role: str, after: int) -> list[int]:
+    def _markers(role: str, after: int, only: list[str] | None = None) -> list[int]:
         return [
             i
             for i, m in enumerate(messages)
@@ -227,10 +211,14 @@ def _with_images(messages: list[ChatCompletionMessageParam]) -> list[ChatComplet
             and m.get("role") == role
             and isinstance(c := m.get("content"), str)
             and c.startswith(IMAGE_MARKER_PREFIX)
+            and (only is None or c.split("\n", 1)[0] in only)
         ]
 
     out = list(messages)
-    for idxs, budget in ((_markers("user", -1), IMAGE_HISTORY_TURNS), (_markers("tool", last_user), 1)):
+    for idxs, budget in (
+        (_markers("user", -1), IMAGE_HISTORY_TURNS),
+        (_markers("tool", last_user, reel), len(reel)),
+    ):
         expanded = 0
         for i in reversed(idxs):
             if expanded >= budget:
@@ -240,10 +228,14 @@ def _with_images(messages: list[ChatCompletionMessageParam]) -> list[ChatComplet
                 out[i] = {**messages[i], "content": parts}  # type: ignore[typeddict-item]
             except OSError as exc:
                 # The marker is permanent history; a pruned or lost file must not brick every later
-                # turn. The model still sees the marker line, so nothing is silently fabricated.
-                logger.warning(f"image file missing for history[{i}], sending marker text only: {exc}")
+                # turn. The strip pass below turns it into the placeholder, so the model is told a
+                # picture is missing rather than shown a name for one it cannot see.
+                logger.warning(f"image file missing for history[{i}], sending text only: {exc}")
                 continue
             expanded += 1
+    for i, m in enumerate(out):
+        if isinstance(c := m.get("content"), str) and c.startswith(IMAGE_MARKER_PREFIX):
+            out[i] = {**m, "content": _strip_markers(c) or "(picture not shown)"}  # type: ignore[call-overload]
     return out
 
 
@@ -254,13 +246,9 @@ _SCHEMA_INSTRUCTIONS = (
     "For each claim, cite the exact source: system prompt / MASTER.md rule (e.g. 'system prompt states X'), "
     "named tool result (e.g. 'memory_search returned empty'), "
     "named memory entry (e.g. 'memory user-prefers-polish'), quoted past message, exact channel rule, "
-    "or an image you were shown (a '[IMAGE ...]' message; cite as 'attached image shows X'). "
-    "A message starting with '[IMAGE <file> <mime>]' has that picture ATTACHED — you can already see it, "
-    "so describe it directly — that filename is an internal reference, not a workspace file.\n"
-    "- SENDING A PICTURE: `attachments` is the only way. Get the picture into your context first "
-    "(image_search → download_image for the web, read_image for a workspace file), check it is really "
-    "what was asked for, then put that filename in `attachments`. A URL in the message text sends nothing. "
-    "For any admission of inability (e.g. 'I don't have that data', 'I found nothing'): cite the tool "
+    "or a picture you can see (cite as 'the picture shows X').\n"
+    "- Every picture you draw, change or fetch is sent to the user as you make it.\n"
+    "- For any admission of inability (e.g. 'I don't have that data', 'I found nothing'): cite the tool "
     "you ran and what it returned, AND the rule that directs you to inform the user of this. "
     "Vague justifications ('seemed appropriate', 'no relevant info') will fail review.\n"
     "- message: the exact text delivered to the user. Write ONLY the direct answer — no preamble, "
@@ -493,13 +481,14 @@ class AgentLoop:
         call_counts: dict[str, int] = {}  # identical tool calls this turn — see _REPEATED_CALL_LIMIT
         tool_counts: dict[str, int] = {}  # calls per tool NAME this turn — see _TOOL_CALLS_PER_TURN_LIMIT
         seen_interims: set[str] = set()  # interim lines already delivered this turn (dedup)
+        reel: list[str] = []  # markers for pictures made this turn; edit_image replaces its source
 
         while iterations < _MAX_TOOL_ITERATIONS:
             iterations += 1
 
             # Phase 1: tool-capable call (no response_model/response_format — lets model call tools freely)
             logger.info(f"🤖 LLM call start (iter={iterations}, msgs={len(messages)})")
-            response = await self._llm.chat(_with_images(messages), tools=self._tool_registry.definitions)
+            response = await self._llm.chat(_with_images(messages, reel), tools=self._tool_registry.definitions)
             self._ctx.update(response)
 
             if response.finish_reason != "error":
@@ -578,6 +567,13 @@ class AgentLoop:
                     def _trunc(v: object, n: int = 30) -> str:
                         s = json.dumps(v) if not isinstance(v, str) else v
                         return s if len(s) <= n else s[:n] + "..."
+                    if is_edit := (tc.name.rsplit("__", 1)[-1] == EDIT_IMAGE_TOOL):
+                        # Overwrite unconditionally: `definitions` hides this parameter from the
+                        # model, so any value present is imitation of old history rather than a
+                        # choice it gets to make. Resolved before `sig` so an edit CHAIN counts as
+                        # progress — the source differs each time — while re-editing the same
+                        # picture with the same prompt still trips the repeat guard.
+                        tc.arguments = {**(tc.arguments or {}), "image_filename": _newest_image(reel, messages)}
                     args_preview = "{" + ", ".join(f"{k}: {_trunc(v)}" for k, v in (tc.arguments or {}).items()) + "}"
                     logger.info(f"🔧 tool call: {tc.name!r} args={args_preview}")
                     sig = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True, default=str)}"
@@ -607,8 +603,31 @@ class AgentLoop:
                             "(e.g. `python draw_square.py`). If the work is already done, stop "
                             "calling tools and write your answer."
                         )
+                    elif is_edit and not tc.arguments["image_filename"]:
+                        result = (
+                            "error: there is no picture to change. Draw one with generate_image, or find "
+                            "one with image_search and download_image."
+                        )
                     else:
                         result = await self._tool_registry.execute(tc.name, tc.arguments)
+                    if _IMAGE_MARKER.match(marker := result.split("\n", 1)[0]):
+                        # A tool that returns a picture returns it to the USER — there is no
+                        # attachments field any more. Sending it here, on its own, is also the only
+                        # sign of life during a 30-60s generate.
+                        if is_edit and reel:
+                            reel[-1] = marker  # the change replaces its source rather than joining it
+                        else:
+                            reel.append(marker)
+                        del reel[:-MAX_OUTBOUND_ATTACHMENTS]  # older ones stay sent, just not in context
+                        if not _deliverable(marker):
+                            logger.warning(f"picture cannot be sent, context only: {marker}")
+                            result += "\n(this picture could not be sent to the user)"
+                        elif msg.channel != CRON_CHANNEL:
+                            logger.info(f"🖼️ delivering picture to {msg.channel!r}: {marker}")
+                            try:
+                                await self._channel_manager.send_full_msg(msg.channel, "", _load_attachments([marker]))
+                            except Exception as exc:
+                                logger.warning(f"picture delivery to {msg.channel!r} skipped: {exc}")
                     messages.append(ChatCompletionToolMessageParam(role="tool", tool_call_id=tc.id, content=result))
                 continue
 
@@ -632,18 +651,22 @@ class AgentLoop:
                     content=(
                         f"The request you must answer NOW is: {_request_preview(msg.text)}\n"
                         "The conversation above is context; its earlier requests are already answered.\n"
-                        "Produce your Answer as a JSON object: justification (str), message (str), "
-                        "attachments (list[str], omit when empty). message must never be empty — every "
-                        "turn gets an answer. "
+                        "Produce your Answer as a JSON object: justification (str), message (str). "
+                        "message must never be empty — every turn gets an answer. "
                         "IMPORTANT: if this task required a file edit or other tool action that has NOT yet been "
-                        "performed in this turn, do NOT claim it in message — call the tool first. "
-                        "If the user asked to be SENT a picture, put the filename from its "
-                        "'[IMAGE <file> <mime>]' marker into attachments — that is the only way it is "
-                        "delivered; describing or linking it does not send it."
+                        "performed in this turn, do NOT claim it in message — call the tool first."
+                        # Without this the model writes "I cannot send pictures" in the same turn the
+                        # user is already looking at one it made.
+                        + (
+                            f" The {len(reel)} picture(s) you made this turn have already been sent — write "
+                            "the message as if the user is looking at them."
+                            if reel
+                            else ""
+                        )
                     ),
                 )
             )
-            struct_resp = await self._llm.chat(_with_images(struct_msgs), response_model=Answer)
+            struct_resp = await self._llm.chat(_with_images(struct_msgs, reel), response_model=Answer)
             initial_answer: Answer | None = struct_resp.parsed if isinstance(struct_resp.parsed, Answer) else None
             if initial_answer is not None:
                 raw_preview = initial_answer.message[:200] + ("…" if len(initial_answer.message) > 200 else "")
@@ -675,7 +698,6 @@ class AgentLoop:
                 except Exception as exc:
                     logger.warning(f"typing signal to {msg.channel!r} failed: {exc}")
 
-            att_markers: list[str] = []
             if not initial_answer.message.strip():
                 review = Review(
                     is_correct=False,
@@ -685,36 +707,18 @@ class AgentLoop:
                     ],
                 )
             else:
-                # Resolve outbound attachments before review so the reviewer judges exactly what
-                # would be sent. Names the model invented are dropped here and reported back to it.
-                att_markers, att_rejected = _resolve_attachments(initial_answer.attachments)
-                if att_rejected:
-                    logger.warning(f"dropped unknown attachment(s): {att_rejected}")
                 # The reviewer sees the pictures too. Without them it cannot verify a description of
                 # an image, falls back on "the claimed tool call is missing", and rejects every
-                # correct image answer — which then drives the agent into a doomed read_image hunt.
+                # correct image answer — which then drove the agent into a doomed read_image hunt.
+                # These are already delivered, so it judges the text against them; it cannot unsend.
                 review = await self._reviewer.run_review(
-                    _with_images(messages),
+                    _with_images(messages, reel),
                     assistant_msg,
                     initial_answer.justification,
-                    attachment_parts=_expand_markers("\n".join(att_markers)) if att_markers else None,
+                    attachment_parts=_expand_markers("\n".join(reel)) if reel else None,
                     current_request=msg.text,
                     called_tool_names=sorted(tool_counts.keys()) or None,
                 )
-                if review.is_correct and att_rejected:
-                    avail = _available_attachments(messages)
-                    review = Review(
-                        is_correct=False,
-                        to_be_fixed=[
-                            f"attachment(s) not sent: {'; '.join(att_rejected)}. "
-                            + (
-                                f"Copy one of these EXACTLY into attachments: {avail}."
-                                if avail
-                                else "No image has been fetched this turn — call download_image first, then "
-                                "copy the filename from the '[IMAGE <file> <mime>]' marker it returns."
-                            )
-                        ],
-                    )
 
             if review_start_idx < 0:
                 review_start_idx = len(messages)
@@ -726,12 +730,10 @@ class AgentLoop:
                 logger.info(f"✅ review passed (attempt {review_rejections + 1}) justification={just_preview!r}")
                 # An empty message is rejected before review, so an accepted answer always delivers.
                 preview = initial_answer.message[:120] + ("…" if len(initial_answer.message) > 120 else "")
-                att_note = f" +{len(att_markers)} attachment(s)" if att_markers else ""
-                logger.info(f"📤 delivering to {msg.channel!r}: {preview!r}{att_note}")
+                logger.info(f"📤 delivering to {msg.channel!r}: {preview!r}")
                 try:
-                    await self._channel_manager.send_full_msg(
-                        msg.channel, initial_answer.message, _load_attachments(att_markers)
-                    )
+                    # Text only: every picture went out on its own the moment the tool made it.
+                    await self._channel_manager.send_full_msg(msg.channel, initial_answer.message)
                     turn_delivered = True
                 except Exception as exc:
                     logger.warning(f"delivery to {msg.channel!r} skipped: {exc}")

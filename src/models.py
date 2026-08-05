@@ -17,15 +17,6 @@ class Answer(BaseModel):
             "turn gets an answer, even if that answer is that you could not do or find something."
         ),
     )
-    attachments: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Image files to attach to the delivered message. Use ONLY a filename you have actually been "
-            "shown in a '[IMAGE <file> <mime>]' marker — i.e. the result of download_image or read_image, or "
-            "an image the user sent you. Pass the bare <file> part, not the whole marker. Attach a picture "
-            "only when the user asked to be sent one; leave empty otherwise. Never invent a filename."
-        ),
-    )
 
 
 class Review(BaseModel):
