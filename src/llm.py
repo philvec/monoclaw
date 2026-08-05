@@ -130,6 +130,15 @@ class LLMClient:
             return LLMResponse(content="", finish_reason="error", error=str(exc))
 
         result = self._parse_chunks(chunks)
+        if result.finish_reason == "length":
+            # Otherwise invisible: a cut-off tool call simply vanishes, and a cut-off JSON body
+            # leaves content empty, which reads downstream as a plain "parse failure". Reasoning
+            # counts against this budget but lands in reasoning_content, so a think block alone can
+            # consume it and return nothing at all.
+            logger.warning(
+                f"⚠️ truncated at max_tokens={kwargs['max_tokens']} — "
+                f"{len(result.content)} content chars, {len(result.tool_calls)} tool call(s)"
+            )
         if response_model is not None and result.content:
             parsed: BaseModel | None = None
             try:

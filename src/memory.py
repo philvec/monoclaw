@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from config import logger, ToolsConfig
+from config import logger, MEMORY_ENABLED, ToolsConfig
 from llm import LLMClient
 from memory_store import MemoryStore, MemoryEntry
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionUserMessageParam
@@ -14,13 +14,7 @@ _BASE_SYSTEM_PROMPT = """\
 You are a personal AI assistant.
 You have a single continuous session shared across all channels — your conversation history \
 is fully persistent and restored across restarts. \
-You have access to context AND memory; if prior context is visible in the conversation, use it. \
-After each turn, key facts are automatically extracted and saved to long-term memory \
-(you will see [MEMORY SAVED] notes in the conversation when this happens).
-
-You have long-term memory accessible via tools. \
-Use memory_search to find relevant memories by keyword. Use memory_read to get full content by slug. \
-Before answering questions about prior context, preferences, or decisions, search your memory. \
+If prior context is visible in the conversation, use it. \
 Never claim to have searched or checked anything without having called the corresponding tool first.
 
 You may have access to tools for file operations, running commands, web search, and web fetch.
@@ -30,12 +24,10 @@ When using tools, prefer the simplest approach.
 Tool use — BIAS TOWARD ACTION:
 When in doubt, use a tool rather than guess or claim inability. Specifically:
 - Need a fact, current data, or real-time info → use web search or web fetch before saying you lack access.
-- Asked about memory, past context, preferences, or prior decisions → call memory_search first. \
-If the answer is already stated in the system prompt (e.g. a MASTER.md rule), you may cite it directly \
-as a source in your justification.
+- Asked about past context, preferences, or prior decisions → if the answer is stated in the system \
+prompt (e.g. a MASTER.md rule), cite it directly as a source in your justification.
 - Asked to do something (send, create, schedule, control, fetch) → attempt the tool; only report failure \
 if the tool actually fails.
-- Unsure if a memory exists → search for it; do not assume absence without checking.
 Never fabricate a tool result. Never say "I searched" or "I checked" unless you called the tool this turn.
 
 Brevity — HARD RULE:
@@ -95,6 +87,16 @@ correct primitive for "self-wakeup to complete a workflow" — do NOT abuse `sch
 - `schedule` is for recurring chores (daily reports, periodic checks); `defer_turn` is for \
 one-shot self-continuations of the current thread.
 """
+
+# Appended only while MEMORY_ENABLED — naming these tools when they are not registered would just
+# teach the model to call something that is not there.
+_MEMORY_PROMPT = """\
+You have long-term memory accessible via tools. \
+Use memory_search to find relevant memories by keyword. Use memory_read to get full content by slug. \
+Before answering questions about prior context, preferences, or decisions, search your memory; \
+if unsure whether a memory exists, search rather than assume absence. \
+After each turn, key facts are automatically extracted and saved \
+(you will see [MEMORY SAVED] notes in the conversation when this happens)."""
 
 # ── extraction prompts ──
 
@@ -171,10 +173,11 @@ class MemoryManager:
 
     def build_system_prompt(self) -> str:
         """Return system prompt with master memory (changes rarely)."""
+        base = _BASE_SYSTEM_PROMPT + ("\n" + _MEMORY_PROMPT if MEMORY_ENABLED else "")
         master = self._store.read_master_memory()
         if master:
-            return _BASE_SYSTEM_PROMPT + "\n\n---\n\n" + master
-        return _BASE_SYSTEM_PROMPT
+            return base + "\n\n---\n\n" + master
+        return base
 
     async def extract_memories(self, conversation: list[ChatCompletionMessageParam]) -> list[MemoryOperation]:
         """Post-turn: extract and apply memory operations. Returns ops performed."""
@@ -189,7 +192,7 @@ class MemoryManager:
         conversation: list[ChatCompletionMessageParam],
         prompt_template: str,
     ) -> list[MemoryOperation]:
-        if not conversation:
+        if not MEMORY_ENABLED or not conversation:
             return []
 
         convo_text = self._format_conversation(conversation)

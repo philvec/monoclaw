@@ -7,7 +7,7 @@ from pathlib import Path
 from agent import AgentLoop, build_channel_ctx
 from channels import InboundMessage, WebSocketChannelManager
 from classifier import FastClassifier
-from config import load_config, logger
+from config import load_config, logger, MEMORY_ENABLED
 from context import ContextManager
 from llm import LLMClient
 from mcp_client import MCPClient, consume_restart_marker
@@ -51,7 +51,7 @@ async def main() -> None:
     await agent.startup()
 
     # optional: scheduled memory consolidation
-    if cfg.tools.memory_consolidation_cron:
+    if MEMORY_ENABLED and cfg.tools.memory_consolidation_cron:
         try:
             cron.add_job(
                 schedule=CronSchedule(type="cron", cron_expr=cfg.tools.memory_consolidation_cron),

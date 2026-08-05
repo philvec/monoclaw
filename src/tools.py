@@ -10,7 +10,7 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from channels import WebSocketChannelManager
-from config import Config, IMAGE_MIME_EXT, IMAGES_DIR, logger, sniff_image_mime, to_decodable_image
+from config import Config, IMAGE_MIME_EXT, IMAGES_DIR, logger, MEMORY_ENABLED, sniff_image_mime, to_decodable_image
 from llm import LLMClient
 from mcp_client import note_mcp_result
 from memory_store import MemoryStore
@@ -119,10 +119,12 @@ class ToolRegistry:
             SendMessageTool(cfg, channel_manager),
             ListChannelsTool(cfg, channel_manager),
             DeferTurnTool(cfg, cron),
-            MemorySearchTool(cfg, memory_store, llm),
-            MemoryReadTool(cfg, memory_store),
+            # master_memory is NOT part of MEMORY_ENABLED: MASTER.md rule 5 requires writing to it,
+            # and it is injected into the system prompt either way.
             MasterMemoryTool(cfg, memory_store),
         ]
+        if MEMORY_ENABLED:
+            tools += [MemorySearchTool(cfg, memory_store, llm), MemoryReadTool(cfg, memory_store)]
         for tool in tools:
             registry.register(tool)
         return registry

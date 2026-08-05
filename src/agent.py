@@ -21,6 +21,7 @@ from config import (
     CRON_CHANNEL,
     IMAGE_HISTORY_TURNS,
     IMAGE_MIME_EXT,
+    MEMORY_ENABLED,
     IMAGES_DIR,
     LLM_IMAGE_MIMES,
     OUTBOUND_IMAGES_MAX_TOTAL_BYTES,
@@ -249,8 +250,9 @@ _SCHEMA_INSTRUCTIONS = (
     "- justification: internal reasoning only, never shown to the user. "
     "Must explicitly justify every factual claim put in the message. "
     "For each claim, cite the exact source: system prompt / MASTER.md rule (e.g. 'system prompt states X'), "
-    "named tool result (e.g. 'memory_search returned empty'), "
-    "named memory entry (e.g. 'memory user-prefers-polish'), quoted past message, exact channel rule, "
+    "named tool result (e.g. 'web_search returned empty'), "
+    + ("named memory entry (e.g. 'memory user-prefers-polish'), " if MEMORY_ENABLED else "")
+    + "quoted past message, exact channel rule, "
     "or a picture you can see (cite as 'the picture shows X').\n"
     "- Every picture you draw, change or fetch is sent to the user as you make it.\n"
     "- For any admission of inability (e.g. 'I don't have that data', 'I found nothing'): cite the tool "
@@ -270,8 +272,9 @@ _SCHEMA_INSTRUCTIONS = (
     "Every response is reviewed. The reviewer verifies that every claim in the message is traceable to a "
     "specific cited source in the justification.\n"
     "TOOL POLICY: For questions about specific named entities (people, places, organisations, events), "
-    "current facts (prices, schedules, availability, rankings), or any knowledge not confirmed by memory — "
-    "if memory_search finds nothing relevant, call tools__web_search before answering. "
+    "current facts (prices, schedules, availability, rankings), or any knowledge not already in this "
+    + ("conversation — if memory_search finds nothing relevant, " if MEMORY_ENABLED else "conversation — ")
+    + "call tools__web_search before answering. "
     "Never rely on training knowledge alone for such facts; it may be stale or wrong.\n"
     "ACTION RULE: Any action that requires a tool (editing a file, writing a file, running a command) "
     "MUST be executed via a tool call BEFORE your final Answer. "
@@ -822,7 +825,7 @@ class AgentLoop:
         # Coalesce extraction tasks. On cap hit, bypass the task system entirely and
         # await extraction directly — session lock is still held, so all new turns queue
         # behind us until it completes. No cancellation possible.
-        if llm_ok:
+        if llm_ok and MEMORY_ENABLED:
             if self._pending_extract and not self._pending_extract.done():
                 self._extract_cancel_count += 1
                 self._pending_extract.cancel()
