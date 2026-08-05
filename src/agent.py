@@ -146,6 +146,19 @@ def _newest_image(reel: list[str], messages: list[ChatCompletionMessageParam]) -
     return fname if (IMAGES_DIR / fname).is_file() else ""
 
 
+def _is_narration(text: str) -> bool:
+    """Whether phase-1 prose is a narration line rather than a leaked Answer.
+
+    The interim reaches a real channel verbatim, and phase 1 has no response_format because it must
+    stay free to call tools. After a few rejections the model starts producing the Answer object
+    here instead of in phase 2 — that shipped a fenced JSON blob, `justification` included, into a
+    group. justification is internal by contract, so drop it: phase 2 delivers the real answer
+    moments later, and extracting `message` from it would only double-send.
+    """
+    t = text.lstrip()
+    return not (t.startswith("```") or t.startswith("{") or '"justification"' in t)
+
+
 def _deliverable(marker: str) -> bool:
     """Whether this picture can go out as its own message.
 
@@ -543,7 +556,9 @@ class AgentLoop:
                 # only moment it is still useful. Deliberately NOT setting turn_delivered: the
                 # answer is still outstanding, so the safety net below must stay armed.
                 interim = (response.content or "").strip()
-                if interim and msg.channel != CRON_CHANNEL:
+                if interim and not _is_narration(interim):
+                    logger.warning(f"🚫 interim looks like a leaked Answer, not sent: {interim[:120]!r}")
+                elif interim and msg.channel != CRON_CHANNEL:
                     preview = interim[:120] + ("…" if len(interim) > 120 else "")
                     # Every interim is a real Signal message. A flailing turn repeats the same line
                     # on each tool call, which spammed a group with four identical messages — send
