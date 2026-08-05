@@ -86,7 +86,7 @@ def _persist_user_content(msg: InboundMessage) -> str:
 
 
 def _expand_markers(content: str) -> list[ChatCompletionContentPartParam]:
-    """Leading '[IMAGE ...]' marker lines → image parts; the remaining text → one text part."""
+    """Leading '[IMAGE ...]' marker lines → image parts; the content verbatim → one text part."""
     parts: list[ChatCompletionContentPartParam] = []
     rest: list[str] = []
     for line in content.split("\n"):
@@ -102,7 +102,11 @@ def _expand_markers(content: str) -> list[ChatCompletionContentPartParam]:
                 image_url={"url": f"data:{m.group(2)};base64,{base64.b64encode(data).decode('ascii')}"},
             )
         )
-    if text := "\n".join(rest).strip():
+    # Keep the marker lines in the text as well. Expansion is the only place the model could read a
+    # picture's filename, so consuming them left it unable to name an image the user sent: it passed
+    # invented names to edit_image and attachments. Markers are strictly leading, so `content` is
+    # already exactly those lines followed by `rest`.
+    if text := content.strip():
         parts.append(ChatCompletionContentPartTextParam(type="text", text=text))
     return parts
 
