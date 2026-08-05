@@ -44,7 +44,7 @@ from openai.types.chat.chat_completion_message_tool_call_param import ChatComple
 from tools import EDIT_IMAGE_TOOL, ToolRegistry
 
 _MAX_TOOL_ITERATIONS = 20
-_REPEATED_CALL_LIMIT = 2  # identical (name, args) executions per turn before the call is refused
+_REPEATED_CALL_LIMIT = 1  # identical (name, args) executions per turn before the call is refused
 _TOOL_CALLS_PER_TURN_LIMIT = 6  # per tool NAME — catches loops that vary one argument to evade the above
 _MAX_EXTRACT_CANCELS = 8  # force extraction after this many consecutive deferrals
 _CHECKPOINT_PATH = Path("./data/history.jsonl")
@@ -603,10 +603,17 @@ class AgentLoop:
                         result = (
                             f"error: you already called {tc.name} with these exact arguments "
                             f"{call_counts[sig] - 1} time(s) this turn, so calling it again changes "
-                            "nothing. Use a DIFFERENT tool for the next step. Note write_file only "
-                            "saves a file, it never executes it — running something is run_command "
-                            "(e.g. `python draw_square.py`). If the work is already done, stop "
-                            "calling tools and write your answer."
+                            "nothing. If that work is done, write your answer; otherwise use a "
+                            "DIFFERENT tool or different arguments."
+                            # Scoped to the tool it is about. As a blanket sentence it reached every
+                            # refusal — an agent told to stop re-editing a picture was lectured about
+                            # `python draw_square.py`.
+                            + (
+                                " Note write_file only saves a file, it never executes it — running "
+                                "something is run_command (e.g. `python draw_square.py`)."
+                                if tc.name.rsplit("__", 1)[-1] == "write_file"
+                                else ""
+                            )
                         )
                     elif is_edit and not tc.arguments["image_filename"]:
                         result = (
