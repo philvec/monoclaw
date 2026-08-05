@@ -55,6 +55,11 @@ _CHECKPOINT_PATH = Path("./data/history.jsonl")
 IMAGE_MARKER_PREFIX = "[IMAGE "
 _IMAGE_MARKER = re.compile(r"^\[IMAGE ([^\s\]]+) (image/[^\s\]]+)\]$")
 MAX_REEL_IMAGES = 4  # pictures kept visible in the prompt; each was already sent when it was made
+# Answer already HAS a reasoning field — `justification` — so a think block reasons twice and throws
+# the expensive copy away. Worse, reasoning is billed against max_tokens but arrives in a separate
+# field that _parse_chunks drops, so overrunning yields EMPTY content: 110s spent, no Answer, the
+# turn silently retried. Only the generation suffix changes, so the cached prefix still applies.
+_ANSWER_THINKING = False
 
 
 def _persist_user_content(msg: InboundMessage) -> str:
@@ -660,7 +665,9 @@ class AgentLoop:
                     ),
                 )
             )
-            struct_resp = await self._llm.chat(_with_images(struct_msgs, reel), response_model=Answer)
+            struct_resp = await self._llm.chat(
+                _with_images(struct_msgs, reel), response_model=Answer, enable_thinking=_ANSWER_THINKING
+            )
             initial_answer: Answer | None = struct_resp.parsed if isinstance(struct_resp.parsed, Answer) else None
             if initial_answer is not None:
                 raw_preview = initial_answer.message[:200] + ("…" if len(initial_answer.message) > 200 else "")
