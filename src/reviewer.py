@@ -15,6 +15,11 @@ from models import Review
 
 MAX_NEGATIVE_REVIEWS = 4
 _MAX_REQUEST_CHARS = 2000  # group turns carry a whole transcript; keep the marker readable
+# Reasoning is billed against max_tokens but returned in a separate field, so a long think block
+# truncates the verdict itself: measured 836 completion tokens for a 20-char answer. A truncated
+# verdict does not parse, and an unparsed review DEFAULTS TO APPROVED — which is how a turn that
+# made no tool call at all shipped "engines added". The verdict's reasoning belongs in to_be_fixed.
+_THINKING = False
 
 _REVIEW_PROMPT = (
     "REVIEW (internal, not delivered). Evaluate the preceding assistant message: "
@@ -118,7 +123,7 @@ class Reviewer:
         """Pre-warm the reviewer KV cache with the current history prefix."""
         review_msgs = self._build_review_prefix(messages)
         review_msgs.append(ChatCompletionUserMessageParam(role="user", content="."))
-        await self._llm.chat(review_msgs, max_tokens=1)
+        await self._llm.chat(review_msgs, max_tokens=1, enable_thinking=_THINKING)
 
     async def run_review(
         self,
@@ -172,7 +177,7 @@ class Reviewer:
                     ],
                 )
             )
-        resp = await self._llm.chat(review_msgs, response_model=Review)
+        resp = await self._llm.chat(review_msgs, response_model=Review, enable_thinking=_THINKING)
         if isinstance(resp.parsed, Review):
             return resp.parsed
         logger.warning(

@@ -94,14 +94,18 @@ class LLMClient:
         tools: list[dict] | None = None,
         response_model: type[BaseModel] | None = None,
         max_tokens: int | None = None,
+        enable_thinking: bool | None = None,
     ) -> LLMResponse:
+        # enable_thinking also changes the rendered prefix, so a caller that overrides it must use
+        # the same value for its cache warm or the warm is wasted on a prefix that never recurs.
+        thinking = self._cfg.enable_thinking if enable_thinking is None else enable_thinking
         kwargs: dict[str, Any] = {
             "model": "local",  # llama.cpp ignores this field
             "messages": messages,
             "max_tokens": max_tokens or self._cfg.max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "extra_body": {"chat_template_kwargs": {"enable_thinking": self._cfg.enable_thinking}},
+            "extra_body": {"chat_template_kwargs": {"enable_thinking": thinking}},
         }
         if tools:
             kwargs["tools"] = tools
