@@ -54,7 +54,7 @@ _CHECKPOINT_PATH = Path("./data/history.jsonl")
 # _with_images expands them into content parts at the llm.chat() boundary only, on a copy.
 IMAGE_MARKER_PREFIX = "[IMAGE "
 _IMAGE_MARKER = re.compile(r"^\[IMAGE ([^\s\]]+) (image/[^\s\]]+)\]$")
-MAX_OUTBOUND_ATTACHMENTS = 4
+MAX_REEL_IMAGES = 4  # pictures kept visible in the prompt; each was already sent when it was made
 
 
 def _persist_user_content(msg: InboundMessage) -> str:
@@ -612,7 +612,7 @@ class AgentLoop:
                             reel[-1] = marker  # the change replaces its source rather than joining it
                         else:
                             reel.append(marker)
-                        del reel[:-MAX_OUTBOUND_ATTACHMENTS]  # older ones stay sent, just not in context
+                        del reel[:-MAX_REEL_IMAGES]  # older ones stay sent, just not in context
                         if not _deliverable(marker):
                             logger.warning(f"picture cannot be sent, context only: {marker}")
                             result += "\n(this picture could not be sent to the user)"
