@@ -46,12 +46,23 @@ def to_decodable_image(data: bytes, mime: str) -> tuple[bytes, str]:
     """Return (data, mime) the LLM backend can read, converting if needed. Raises if impossible.
 
     A large share of web images are WebP, so converting beats refusing them.
+
+    The declared mime is NOT evidence that the bytes are readable. signal-cli served an attachment
+    as 200 with an empty body; it arrived labelled image/jpeg, and trusting that label stored a
+    0-byte file whose marker then 400'd every later turn — including turns carrying no image at
+    all. Verify the pixels whatever the label claims: callers already turn a raise into a visible
+    "nie widzę go" note instead of a marker, which fails one message rather than the assistant.
     """
-    if mime in LLM_IMAGE_MIMES:
-        return data, mime
     import io
 
     from PIL import Image
+
+    if not data:
+        raise ValueError("empty image payload")
+    if mime in LLM_IMAGE_MIMES:
+        with Image.open(io.BytesIO(data)) as im:
+            im.verify()  # full parse; trivial next to a 400 that bricks every later turn
+        return data, mime
 
     with Image.open(io.BytesIO(data)) as im:
         buf = io.BytesIO()
