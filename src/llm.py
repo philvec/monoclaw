@@ -117,9 +117,12 @@ class LLMClient:
                 "type": "json_schema",
                 "json_schema": {"name": response_model.__name__, "schema": schema},
             }
-            if self._schema_tools:
-                kwargs["tools"] = self._schema_tools
-                kwargs["tool_choice"] = "auto"
+            # Deliberately NOT also passing self._schema_tools here. llama.cpp b10889
+            # cannot build a sampler grammar for response_format AND tools together --
+            # each alone is fine, the combination returns
+            # 400 "Failed to initialize samplers: failed to parse grammar". That made
+            # every Phase 2 call fail, so the agent retried 20x and fell through to the
+            # abstention line on every single message.
 
         chunks: list[Any] = []
         try:
