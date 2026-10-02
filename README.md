@@ -75,6 +75,9 @@ llm:
   base_url: http://your-llama-cpp-host:8080/v1
   embeddings_url: http://your-embedding-server:8090/v1  # optional, falls back to base_url
   max_tokens: 4096
+  sampling_instruct:            # used when enable_thinking is off; sampling_thinking when on
+    temperature: 0.7            # temperature/top_p/top_k/min_p/presence_penalty/repeat_penalty,
+    presence_penalty: 1.5       # unset = server default (env: LLM__SAMPLING_INSTRUCT__TEMPERATURE)
 
 tools:
   memory_decay_halflife_days: 30     # older memories rank lower in search
@@ -94,6 +97,11 @@ mcp:
     transport: sse
     url: http://my-mcp-server:8000/sse
 ```
+
+Set `llm.sampling_thinking` and `llm.sampling_instruct` to the model card's values for whichever
+model you serve. With llama.cpp, unset fields fall back to its own defaults — at best the one set
+baked into the GGUF (usually the thinking-mode one) — for every call, so thinking and non-thinking
+calls don't get the sampling the model was tuned for.
 
 **2. Build and run**
 

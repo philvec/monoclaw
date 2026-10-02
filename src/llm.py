@@ -107,6 +107,8 @@ class LLMClient:
             "stream_options": {"include_usage": True},
             "extra_body": {"chat_template_kwargs": {"enable_thinking": thinking}},
         }
+        sampling = self._cfg.sampling_thinking if thinking else self._cfg.sampling_instruct
+        kwargs["extra_body"].update(sampling.model_dump(exclude_none=True))
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"

@@ -100,6 +100,17 @@ WS_MAX_FRAME_BYTES = 16 * 1024 * 1024  # base64 images exceed the websockets def
 OUTBOUND_IMAGES_MAX_TOTAL_BYTES = 8 * 1000 * 1000
 
 
+class SamplingConfig(BaseModel):
+    # Unset fields are not sent, so the server's defaults (llama.cpp reads them from the GGUF) apply.
+    # Field names are llama.cpp's request keys: repeat_penalty is the usual repetition_penalty.
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    presence_penalty: float | None = None
+    repeat_penalty: float | None = None
+
+
 class LLMConfig(BaseModel):
     base_url: str = "http://localhost:8080/v1"
     embeddings_url: str = ""  # separate embedding server; falls back to base_url if empty
@@ -113,6 +124,9 @@ class LLMConfig(BaseModel):
     max_history_messages: int = 100  # also triggers compaction when history exceeds this many messages
     compaction_keep_ratio: float = 0.25  # fraction of history to keep after compaction (rest is summarized)
     enable_thinking: bool = True
+    # Picked per call by its enable_thinking, e.g. LLM__SAMPLING_INSTRUCT__PRESENCE_PENALTY=1.5.
+    sampling_thinking: SamplingConfig = SamplingConfig()
+    sampling_instruct: SamplingConfig = SamplingConfig()
 
 
 class ToolsConfig(BaseModel):
