@@ -6,8 +6,7 @@ from datetime import datetime, timezone
 
 from pathlib import Path
 from typing import Any
-
-from pydantic import BaseModel, ConfigDict, Field
+from urllib.parse import quote, unquote
 
 from context import ContextManager
 from llm import LLMClient
@@ -47,7 +46,7 @@ _MAX_TOOL_ITERATIONS = 20
 _REPEATED_CALL_LIMIT = 1  # identical (name, args) executions per turn before the call is refused
 _TOOL_CALLS_PER_TURN_LIMIT = 6  # per tool NAME — catches loops that vary one argument to evade the above
 _MAX_EXTRACT_CANCELS = 8  # force extraction after this many consecutive deferrals
-_CHECKPOINT_PATH = Path("./data/history.jsonl")
+_HISTORY_DIR = Path("./data/history")  # one <quoted channel>.jsonl per channel, created on its first message
 
 # Images never enter session history: _process_inner assigns history straight from the prompt list
 # (see "Persist turn to session history" below), so content parts placed in `messages` would be
@@ -339,11 +338,11 @@ def build_channel_ctx(channel: str) -> str:
     return ctx
 
 
-class Session(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    history: list[ChatCompletionMessageParam] = []
-    lock: asyncio.Lock = Field(default_factory=asyncio.Lock)
+def _checkpoint_path(channel: str) -> Path:
+    # quote() with no safe chars: channel names contain '/' (and base64 group ids '+', '='), and the
+    # mapping must stay reversible so startup can tell which channel a file belongs to.
+    _HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    return _HISTORY_DIR / f"{quote(channel, safe='')}.jsonl"
 
 
 class AgentLoop:
@@ -362,12 +361,15 @@ class AgentLoop:
         self._channel_manager = channel_manager
         self._reviewer = Reviewer(llm)
         llm.set_schema_tools(tool_registry.definitions)
-        self._session = Session()
+        # Histories are per channel, but turns stay serialized across all of them: there is one LLM
+        # slot, and tool_registry.current_channel is a single field.
+        self._lock = asyncio.Lock()
+        self._histories: dict[str, list[ChatCompletionMessageParam]] = {}
         self._foreground_count = 0
         self._foreground_idle = asyncio.Event()
         self._foreground_idle.set()
-        self._pending_extract: asyncio.Task | None = None
-        self._extract_cancel_count = 0
+        self._pending_extract: dict[str, asyncio.Task] = {}  # per channel: a newer turn elsewhere covers nothing
+        self._extract_cancel_count: dict[str, int] = {}
         self._pending_warm_reviewer: asyncio.Task | None = None
         self._abstention_line: Any = None
 
@@ -385,15 +387,28 @@ class AgentLoop:
         )
 
     async def startup(self) -> None:
-        """Restore checkpoint and pre-warm the LLM cache."""
+        """Restore the most recently active channel's history and pre-warm the LLM cache with it."""
+        files = sorted(_HISTORY_DIR.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+        if not files:
+            return
+        channel = unquote(files[-1].stem)
         try:
-            self._session.history = self._restore_checkpoint()
+            history = self._history(channel)
         except Exception as exc:
-            logger.error(f"failed to restore checkpoint on startup: {exc}")
-        if self._session.history:
-            logger.info(f"♻️ restored {len(self._session.history)} messages, warming cache")
-            await self._warm_cache()
-            await self._warm_reviewer_cache()
+            logger.error(f"failed to restore checkpoint of {channel!r} on startup: {exc}")
+            return
+        if history:
+            logger.info(f"♻️ restored {len(history)} messages of {channel!r}, warming cache")
+            await self._warm_cache(channel)
+            await self._warm_reviewer_cache(channel)
+
+    def _history(self, channel: str) -> list[ChatCompletionMessageParam]:
+        """The channel's history, read from its checkpoint on first use. Every reader and writer goes
+        through here: appending to a channel not yet loaded would make the next save overwrite its file
+        with just the new messages."""
+        if channel not in self._histories:
+            self._histories[channel] = self._restore_checkpoint(channel)
+        return self._histories[channel]
 
     # Public entry points
 
@@ -402,7 +417,7 @@ class AgentLoop:
         self._foreground_count += 1
         self._foreground_idle.clear()
         try:
-            async with self._session.lock:
+            async with self._lock:
                 await self._process(msg, preamble)
         finally:
             self._foreground_count -= 1
@@ -418,20 +433,21 @@ class AgentLoop:
         letting the caller fall back to the full agent cleanly with no partial state."""
         if msg.channel != CRON_CHANNEL:
             await self._channel_manager.send_full_msg(msg.channel, output)
-        async with self._session.lock:
+        async with self._lock:
+            history = self._history(msg.channel)
             user_msg = ChatCompletionUserMessageParam(role="user", content=_persist_user_content(msg))
             assistant_msg = ChatCompletionAssistantMessageParam(role="assistant", content=output)
-            self._session.history.append(user_msg)
-            self._session.history.append(assistant_msg)
-            self._append_to_checkpoint(user_msg)
-            self._append_to_checkpoint(assistant_msg)
+            history.append(user_msg)
+            history.append(assistant_msg)
+            self._append_to_checkpoint(msg.channel, user_msg)
+            self._append_to_checkpoint(msg.channel, assistant_msg)
 
     async def handle_cron(self, job: CronJob) -> None:
         synthetic = InboundMessage(channel=CRON_CHANNEL, text=job.message, timestamp=0)
         self._foreground_count += 1
         self._foreground_idle.clear()
         try:
-            async with self._session.lock:
+            async with self._lock:
                 await self._process(synthetic, build_channel_ctx(CRON_CHANNEL))
         finally:
             self._foreground_count -= 1
@@ -455,19 +471,18 @@ class AgentLoop:
             )
         ]
 
-        # Restore checkpoint from disk on first turn (skipped if startup() already ran)
-        if not self._session.history:
-            try:
-                self._session.history = self._restore_checkpoint()
-            except Exception as exc:
-                logger.warning(err := f"failed to restore checkpoint: {exc}")
-                messages.append(
-                    ChatCompletionUserMessageParam(
-                        role="user",
-                        content=f"[{SYSERR} — running turn with empty history ({err})]",
-                    )
+        try:
+            history = self._history(msg.channel)
+        except Exception as exc:
+            logger.warning(err := f"failed to restore checkpoint of {msg.channel!r}: {exc}")
+            messages.append(
+                ChatCompletionUserMessageParam(
+                    role="user",
+                    content=f"[{SYSERR} — running turn with empty history ({err})]",
                 )
-        messages.extend(self._session.history)
+            )
+            history = self._histories[msg.channel] = []
+        messages.extend(history)
 
         # Ephemeral pre-message note built by the dispatch layer (main.on_message / handle_cron):
         # channel + datetime context, plus any fast-classifier error. Included in THIS turn's prompt
@@ -482,8 +497,8 @@ class AgentLoop:
         messages.append(user_msg)
 
         # Archive inbound message immediately so it survives any mid-turn failure
-        self._session.history.append(user_msg)
-        self._append_to_checkpoint(user_msg)
+        history.append(user_msg)
+        self._append_to_checkpoint(msg.channel, user_msg)
 
         # Tool execution loop
         iterations = 0
@@ -637,6 +652,8 @@ class AgentLoop:
                         )
                     else:
                         result = await self._tool_registry.execute(tc.name, tc.arguments)
+                        if tc.name == "send_message" and result == f"sent to {tc.arguments.get('channel')}":
+                            self._record_sent(tc.arguments["channel"], tc.arguments["text"])
                     if _IMAGE_MARKER.match(marker := result.split("\n", 1)[0]):
                         # A tool that returns a picture returns it to the USER — there is no
                         # attachments field any more. Sending it here, on its own, is also the only
@@ -821,6 +838,7 @@ class AgentLoop:
         # both the agent and the reviewer that this is the normal, accepted shape — which is how
         # check (4) stopped firing. Tool results directly follow their assistant message, so
         # filtering by shape keeps each call paired with its results.
+        ch = msg.channel
         if review_start_idx >= 0:
             pre_review = messages[1:review_start_idx] + [
                 m
@@ -844,61 +862,67 @@ class AgentLoop:
                     None,
                 )
                 review_outcome = [final_msg] if final_msg else []
-            self._session.history = pre_review + review_outcome
+            self._histories[ch] = pre_review + review_outcome
         else:
-            self._session.history = messages[1:]
-        self._save_checkpoint()
+            self._histories[ch] = messages[1:]
+        self._save_checkpoint(ch)
 
         # Fire-and-forget: compact history and extract memories (skip if LLM was down this turn)
         if llm_ok:
-            asyncio.create_task(self._compact_session(), name="compact")
-        if llm_ok and msg.channel != CRON_CHANNEL:
+            asyncio.create_task(self._compact_session(ch), name="compact")
+        if llm_ok and ch != CRON_CHANNEL:
             if self._pending_warm_reviewer and not self._pending_warm_reviewer.done():
                 self._pending_warm_reviewer.cancel()
-            self._pending_warm_reviewer = asyncio.create_task(self._warm_reviewer_cache(), name="warm-reviewer-cache")
+            self._pending_warm_reviewer = asyncio.create_task(self._warm_reviewer_cache(ch), name="warm-reviewer-cache")
 
-        # Coalesce extraction tasks. On cap hit, bypass the task system entirely and
+        # Coalesce extraction tasks per channel. On cap hit, bypass the task system entirely and
         # await extraction directly — session lock is still held, so all new turns queue
         # behind us until it completes. No cancellation possible.
         if llm_ok and MEMORY_ENABLED:
-            if self._pending_extract and not self._pending_extract.done():
-                self._extract_cancel_count += 1
-                self._pending_extract.cancel()
-                self._pending_extract = None
-                if self._extract_cancel_count >= _MAX_EXTRACT_CANCELS:
+            pending = self._pending_extract.pop(ch, None)
+            if pending and not pending.done():
+                count = self._extract_cancel_count[ch] = self._extract_cancel_count.get(ch, 0) + 1
+                pending.cancel()
+                if count >= _MAX_EXTRACT_CANCELS:
                     logger.info(
-                        f"extract cap reached after {self._extract_cancel_count} deferrals, "
+                        f"extract cap reached after {count} deferrals, "
                         "blocking turn release until extraction completes"
                     )
-                    self._extract_cancel_count = 0
-                    await self._run_extract_memories(self._session.history, force=True)
+                    self._extract_cancel_count[ch] = 0
+                    await self._run_extract_memories(ch, force=True)
                 else:
-                    logger.info(f"extract deferred (deferral #{self._extract_cancel_count}), new turn took priority")
-                    self._pending_extract = asyncio.create_task(
-                        self._run_extract_memories(self._session.history),
-                        name="extract",
-                    )
+                    logger.info(f"extract deferred (deferral #{count}), new turn took priority")
+                    self._pending_extract[ch] = asyncio.create_task(self._run_extract_memories(ch), name="extract")
             else:
-                self._extract_cancel_count = 0
-                self._pending_extract = asyncio.create_task(
-                    self._run_extract_memories(self._session.history),
-                    name="extract",
-                )
+                self._extract_cancel_count[ch] = 0
+                self._pending_extract[ch] = asyncio.create_task(self._run_extract_memories(ch), name="extract")
+
+    def _record_sent(self, channel: str, text: str) -> None:
+        """A send_message delivery belongs to the target channel's conversation: without it, a reply
+        there ("done", "thanks") answers a message that channel's history never saw."""
+        try:
+            history = self._history(channel)
+        except Exception as exc:
+            logger.error(f"message sent to {channel!r} not recorded in its history: {exc}")
+            return
+        sent = ChatCompletionAssistantMessageParam(role="assistant", content=text)
+        history.append(sent)
+        self._append_to_checkpoint(channel, sent)
 
     # Checkpoint
 
-    def _save_checkpoint(self) -> None:
+    def _save_checkpoint(self, channel: str) -> None:
         try:
-            _CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _CHECKPOINT_PATH.write_text("\n".join(json.dumps(m) for m in self._session.history) + "\n")
+            _checkpoint_path(channel).write_text("\n".join(json.dumps(m) for m in self._histories[channel]) + "\n")
         except Exception as exc:
-            logger.error(f"failed to save checkpoint: {exc}")
+            logger.error(f"failed to save checkpoint of {channel!r}: {exc}")
 
-    def _restore_checkpoint(self) -> list[ChatCompletionMessageParam]:
-        if not _CHECKPOINT_PATH.exists():
+    def _restore_checkpoint(self, channel: str) -> list[ChatCompletionMessageParam]:
+        path = _checkpoint_path(channel)
+        if not path.exists():
             return []
         entries = []
-        for line in _CHECKPOINT_PATH.read_text().splitlines():
+        for line in path.read_text().splitlines():
             if not line.strip():
                 continue
             try:
@@ -912,38 +936,38 @@ class AgentLoop:
                 logger.warning(f"skipping corrupted checkpoint line: {exc}")
         return entries
 
-    def _append_to_checkpoint(self, msg: ChatCompletionMessageParam) -> None:
+    def _append_to_checkpoint(self, channel: str, msg: ChatCompletionMessageParam) -> None:
         try:
-            with open(_CHECKPOINT_PATH, "a") as f:
+            with open(_checkpoint_path(channel), "a") as f:
                 f.write(json.dumps(msg) + "\n")
         except Exception as exc:
-            logger.error(f"failed to append to checkpoint: {exc}")
+            logger.error(f"failed to append to checkpoint of {channel!r}: {exc}")
 
-    async def _compact_session(self) -> None:
-        if not self._ctx.should_compact(len(self._session.history)):
+    async def _compact_session(self, channel: str) -> None:
+        if not self._ctx.should_compact(len(self._histories[channel])):
             return
-        async with self._session.lock:
+        async with self._lock:
             # Cancel inside the lock so no new turn can slip in and create a replacement
             # extract task between the cancellation and the start of flush_memories.
-            if self._pending_extract and not self._pending_extract.done():
-                self._pending_extract.cancel()
-                self._pending_extract = None
-                self._extract_cancel_count = 0
+            pending = self._pending_extract.pop(channel, None)
+            if pending and not pending.done():
+                pending.cancel()
+                self._extract_cancel_count[channel] = 0
                 logger.info("🗜️ extract task cancelled: compaction flush covers it")
-            self._archive_checkpoint(self._session.history)
-            self._session.history = await self._ctx.compact(
-                self._session.history,
+            self._archive_checkpoint(channel)
+            self._histories[channel] = await self._ctx.compact(
+                self._histories[channel],
                 self._llm,
                 memory_flush_fn=self._memory.flush_memories,
             )
-            self._save_checkpoint()
+            self._save_checkpoint(channel)
         # pre-warm the LLM cache with the compacted history
-        asyncio.create_task(self._warm_cache(), name="warm-cache")
+        asyncio.create_task(self._warm_cache(channel), name="warm-cache")
         if self._pending_warm_reviewer and not self._pending_warm_reviewer.done():
             self._pending_warm_reviewer.cancel()
-        self._pending_warm_reviewer = asyncio.create_task(self._warm_reviewer_cache(), name="warm-reviewer-cache")
+        self._pending_warm_reviewer = asyncio.create_task(self._warm_reviewer_cache(channel), name="warm-reviewer-cache")
 
-    async def _warm_cache(self) -> None:
+    async def _warm_cache(self, channel: str) -> None:
         """Prefill the LLM cache with current history. Matches _process() message format."""
         try:
             messages: list[ChatCompletionMessageParam] = [
@@ -951,7 +975,7 @@ class AgentLoop:
                     role="system",
                     content=self._build_system_prompt(),
                 ),
-                *self._session.history,
+                *self._histories[channel],
                 ChatCompletionUserMessageParam(role="user", content="INPUT CHANNEL: warmup"),
                 ChatCompletionUserMessageParam(role="user", content="."),
             ]
@@ -962,8 +986,8 @@ class AgentLoop:
         except Exception as exc:
             logger.error(f"agent cache warm-up failed: {exc}")
 
-    async def _warm_reviewer_cache(self) -> None:
-        """Prefill the reviewer KV cache with the current history prefix."""
+    async def _warm_reviewer_cache(self, channel: str) -> None:
+        """Prefill the reviewer KV cache with the channel's history prefix."""
         try:
             if not self._foreground_idle.is_set():
                 logger.info("⏳ reviewer cache warm-up: waiting for foreground idle")
@@ -973,7 +997,7 @@ class AgentLoop:
                     role="system",
                     content=self._build_system_prompt(),
                 ),
-                *self._session.history,
+                *self._histories[channel],
             ]
             logger.info(f"🔥 warming reviewer cache ({len(messages)} msgs)")
             # must match run_review's expansion, or the warmed prefix diverges
@@ -982,17 +1006,19 @@ class AgentLoop:
         except Exception as exc:
             logger.error(f"reviewer cache warm-up failed: {exc}")
 
-    def _archive_checkpoint(self, history: list[ChatCompletionMessageParam]) -> None:
-        if not history:
+    def _archive_checkpoint(self, channel: str) -> None:
+        if not (history := self._histories[channel]):
             return
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         try:
             ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-            (ARCHIVE_DIR / f"{ts}.jsonl").write_text("\n".join(json.dumps(m) for m in history) + "\n")
+            (ARCHIVE_DIR / f"{ts}_{quote(channel, safe='')}.jsonl").write_text(
+                "\n".join(json.dumps(m) for m in history) + "\n"
+            )
         except Exception as exc:
-            logger.error(f"failed to archive checkpoint: {exc}")
+            logger.error(f"failed to archive checkpoint of {channel!r}: {exc}")
 
-    async def _run_extract_memories(self, history: list[ChatCompletionMessageParam], *, force: bool = False) -> None:
+    async def _run_extract_memories(self, channel: str, *, force: bool = False) -> None:
         if not force:
             try:
                 await self._foreground_idle.wait()
@@ -1003,9 +1029,10 @@ class AgentLoop:
         else:
             logger.info("🧠 extract triggered: forced inline (cap reached)")
         try:
-            ops = await self._memory.extract_memories(history)
+            ops = await self._memory.extract_memories(self._histories[channel])
             if ops:
                 self._append_to_checkpoint(
+                    channel,
                     ChatCompletionUserMessageParam(
                         role="user",
                         content="[MEMORY SAVED]\n" + "\n".join(f"- {op.slug} ({op.type})" for op in ops),
@@ -1014,6 +1041,7 @@ class AgentLoop:
         except Exception as exc:
             logger.error(err := f"memory extraction failed: {exc}")
             self._append_to_checkpoint(
+                channel,
                 ChatCompletionUserMessageParam(
                     role="user",
                     content=f"[{SYSERR} — memory was NOT saved: ({err})]",

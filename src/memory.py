@@ -12,8 +12,8 @@ from pydantic import BaseModel, Field, field_validator
 
 _BASE_SYSTEM_PROMPT = """\
 You are a personal AI assistant.
-You have a single continuous session shared across all channels — your conversation history \
-is fully persistent and restored across restarts. \
+Each channel has its own continuous conversation history, fully persistent and restored across \
+restarts; you see only the history of the current INPUT CHANNEL. \
 If prior context is visible in the conversation, use it. \
 Never claim to have searched or checked anything without having called the corresponding tool first.
 
@@ -86,6 +86,8 @@ Initiative and scheduling:
 correct primitive for "self-wakeup to complete a workflow" — do NOT abuse `schedule` for that.
 - `schedule` is for recurring chores (daily reports, periodic checks); `defer_turn` is for \
 one-shot self-continuations of the current thread.
+- Both run on the "cron" channel, which does not see this channel's history: the note or \
+message must state everything that turn needs, including which channel to send to.
 """
 
 # Appended only while MEMORY_ENABLED — naming these tools when they are not registered would just
