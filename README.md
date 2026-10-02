@@ -130,4 +130,10 @@ For tools that need deep integration with monoclaw internals (session history, c
 
 For embeddings, set `llm.embeddings_url` to a dedicated embedding server (recommended) or leave empty to use the main LLM endpoint. A dedicated model like Qwen3-Embedding-8B produces better vectors than pooling from a generative model.
 
+**Protip: give the fast classifier (`CLASSIFIER__BASE_URL`) its own small model**, even when the main model is just as fast in tok/s. The fast path is fast because it sends one tiny prompt with no history, not because of tok/s. On a local single-slot server (llama.cpp `-np 1`), sharing the main model means:
+- each classifier call evicts the agent's cached prefix, so the next agent call reprocesses the whole history;
+- the fast path queues behind a running agent turn.
+
+A dedicated ~4B model (≈5 GB) keeps both caches warm and answers in ~1 s even mid-turn.
+
 See [docs.md](docs.md) for details on the memory system architecture.
