@@ -58,16 +58,17 @@ class LLMClient:
         self._schema_tools = tools
 
     async def fetch_context_window(self) -> int:
-        """Fetch the context window size, retrying until the model is ready."""
+        """Context window the server runs with (llama.cpp: meta.n_ctx), retrying until it is up."""
         while True:
             try:
                 models = await self._client.models.list()
-                model = next(iter(models.data), None)
-                ctx = (model.model_extra or {}).get("context_length") if model else None
-                return int(ctx) if ctx else 8192
+                break
             except Exception as exc:
                 logger.info(f"waiting for LLM to be ready: {exc}")
                 await asyncio.sleep(5)
+        # Outside the retry and without a default: a missing field must stop startup, not loop forever
+        # or hand compaction a guessed window.
+        return int((models.data[0].model_extra or {})["meta"]["n_ctx"])
 
     async def embed(self, text: str) -> np.ndarray | None:
         """Generate embedding via /v1/embeddings. Uses embeddings_url if set, else base_url."""
