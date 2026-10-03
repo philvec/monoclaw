@@ -160,7 +160,7 @@ class FastClassifier:
             fn = ts["function"]
             sig = ", ".join(fn.get("parameters", {}).get("properties", {}).keys())
             blocks.append(f"### {fn['name']}({sig})\n{(fn.get('description') or '').strip()}")
-        return "\n\n## Dostępne narzędzia (ustaw tool_call, gdy prośba do nich pasuje)\n\n" + "\n\n".join(blocks)
+        return "\n\n## Available tools (set tool_call when the request matches one)\n\n" + "\n\n".join(blocks)
 
     @property
     def enabled(self) -> bool:
@@ -282,13 +282,22 @@ class FastClassifier:
             raise ValueError(f"system prompt file is empty: {SYSTEM_PROMPT_PATH}")
         system_prompt += self._tools_doc  # append the self-documenting available-tools section
         # Compact one-line JSON: response_format enforces the SCHEMA, not conciseness — a pretty-printed nested verdict wastes ~34 decode tokens ≈ 0.8s/command (~1.9× slower). Verified 2026-07-20.
-        system_prompt += "\n\nFORMAT WYJŚCIA: zwróć werdykt jako kompaktowy JSON w jednej linii, bez spacji, wcięć ani znaków nowej linii (minified)."
+        system_prompt += (
+            "\n\nOUTPUT FORMAT: return the verdict as compact single-line JSON, with no spaces, indentation "
+            "or newlines (minified)."
+        )
+        # Without the reply it answers, a follow-up reads as a standalone message: "Dobrze zgadłeś!" was
+        # echoed back, and "To jestem ja, Filip" (naming a person in a photo) got a fresh greeting.
+        user = f"Message: {msg.text}"
+        reply, earlier = self._agent.last_reply(msg.channel)
+        if reply:
+            user = f"Previous assistant reply ({earlier} earlier messages not shown):\n{reply}\n\n{user}"
 
         resp = await self._client.chat.completions.create(
             model="local",  # llama.cpp ignores this field
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Kanał: {msg.channel}\nWiadomość: {msg.text}"},
+                {"role": "user", "content": user},
             ],
             max_tokens=self._cfg.max_tokens,
             temperature=0.0,

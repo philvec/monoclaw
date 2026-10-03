@@ -402,6 +402,16 @@ class AgentLoop:
             await self._warm_cache(channel)
             await self._warm_reviewer_cache(channel)
 
+    def last_reply(self, channel: str) -> tuple[str, int]:
+        """The channel's newest reply and how many history messages precede it — the fast classifier's
+        only context. ("", 0) while the channel has no reply yet."""
+        history = self._history(channel)
+        for i in range(len(history) - 1, -1, -1):
+            m = history[i]
+            if m.get("role") == "assistant" and not m.get("tool_calls") and isinstance(c := m.get("content"), str) and c:
+                return c, i
+        return "", 0
+
     def _history(self, channel: str) -> list[ChatCompletionMessageParam]:
         """The channel's history, read from its checkpoint on first use. Every reader and writer goes
         through here: appending to a channel not yet loaded would make the next save overwrite its file
