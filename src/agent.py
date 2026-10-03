@@ -744,12 +744,14 @@ class AgentLoop:
                 except Exception as exc:
                     logger.warning(f"typing signal to {msg.channel!r} failed: {exc}")
 
+            truncated = struct_resp.finish_reason == "length"
             if not initial_answer.message.strip():
                 review = Review(
                     is_correct=False,
                     to_be_fixed=[
                         "message is empty. Every turn must deliver an answer — write one. If you could not "
                         "do or find what was asked, say exactly that."
+                        + (" Your answer was cut off at the output token limit before message." if truncated else "")
                     ],
                 )
             else:
@@ -763,6 +765,7 @@ class AgentLoop:
                     attachment_parts=_expand_markers("\n".join(reel)) if reel else None,
                     current_request=msg.text,
                     called_tool_names=sorted(tool_counts.keys()) or None,
+                    truncated=truncated,
                 )
 
             if review_start_idx < 0:

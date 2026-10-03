@@ -154,6 +154,7 @@ class Reviewer:
         attachment_parts: list[Any] | None = None,
         current_request: str = "",
         called_tool_names: list[str] | None = None,
+        truncated: bool = False,
     ) -> Review:
         review_msgs = self._build_review_prefix(messages)
         assistant_content = str(assistant_msg.get("content") or "")
@@ -175,7 +176,9 @@ class Reviewer:
                 f"must answer]\n{ask}\n\n"
                 f"[ACTUALLY MADE TOOL CALLS THIS ROUND: {tool_list_str}]\n\n"
                 f"[ASSISTANT JUSTIFICATION]\n{justification or '(none provided)'}\n\n"
-                f"[ASSISTANT RESPONSE TO REVIEW]\n{assistant_content}",
+                + ("[TRUNCATED — this answer hit the output token limit (max_tokens) and was cut off where "
+                   "it ends]\n\n" if truncated else "")
+                + f"[ASSISTANT RESPONSE TO REVIEW]\n{assistant_content}",
             )
         )
         # Outbound pictures are injected explicitly rather than relied on from history: the reviewer

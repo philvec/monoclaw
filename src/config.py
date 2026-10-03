@@ -114,12 +114,13 @@ class SamplingConfig(BaseModel):
 class LLMConfig(BaseModel):
     base_url: str = "http://localhost:8080/v1"
     embeddings_url: str = ""  # separate embedding server; falls back to base_url if empty
-    # Phase 1 still thinks, and reasoning is billed here while landing in reasoning_content — so at
-    # 4096 it twice spent ~2min and returned "0 content chars, 0 tool call(s)", losing the tool call
-    # it was about to make. Well inside the 65536 the server is started with. If truncation returns
-    # at this budget the answer is no thinking on phase 1, not a bigger number: 8192 tokens of
-    # reasoning for one edit_image call is looping, not thinking.
-    max_tokens: int = 8192
+    # Thinking counts against max_tokens, so without a budget a think block alone could use it all
+    # and return no content and no tool call. llama.cpp's reasoning budget closes the think block at
+    # reasoning_budget (forcing the message + end tag), which always leaves the remaining 4096 tokens
+    # for the tool call or answer. Prompt (compaction at 32768) + 20480 fits the server's 65536.
+    max_tokens: int = 20480
+    reasoning_budget: int = 16384
+    reasoning_budget_message: str = "… [thinking budget reached — act on the reasoning above now]"
     max_context: int = 32768  # practical context limit for compaction (0 = use model's reported window)
     max_history_messages: int = 100  # also triggers compaction when history exceeds this many messages
     compaction_keep_ratio: float = 0.25  # fraction of history to keep after compaction (rest is summarized)

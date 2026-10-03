@@ -105,7 +105,11 @@ class LLMClient:
             "max_tokens": max_tokens or self._cfg.max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "extra_body": {"chat_template_kwargs": {"enable_thinking": thinking}},
+            "extra_body": {
+                "chat_template_kwargs": {"enable_thinking": thinking},
+                "reasoning_budget_tokens": self._cfg.reasoning_budget,
+                "reasoning_budget_message": self._cfg.reasoning_budget_message,
+            },
         }
         sampling = self._cfg.sampling_thinking if thinking else self._cfg.sampling_instruct
         kwargs["extra_body"].update(sampling.model_dump(exclude_none=True))
@@ -136,10 +140,8 @@ class LLMClient:
 
         result = self._parse_chunks(chunks)
         if result.finish_reason == "length" and kwargs["max_tokens"] > 1:
-            # Otherwise invisible: a cut-off tool call simply vanishes, and a cut-off JSON body
-            # leaves content empty, which reads downstream as a plain "parse failure". Reasoning
-            # counts against this budget but lands in reasoning_content, so a think block alone can
-            # consume it and return nothing at all. max_tokens=1 is the cache-warm call, where
+            # Otherwise invisible: a cut-off tool call is executed with repaired arguments, and a
+            # cut-off JSON body is repaired below. max_tokens=1 is the cache-warm call, where
             # stopping on length is the entire point.
             logger.warning(
                 f"⚠️ truncated at max_tokens={kwargs['max_tokens']} — "
@@ -153,13 +155,22 @@ class LLMClient:
                 try:
                     # Extract the JSON object from the content — handles preamble text,
                     # markdown code fences, and any trailing prose.
+                    # A cut-off body has no closing brace of its own: the last "}" would be one
+                    # inside the text, and slicing there would drop everything after it.
+                    truncated = result.finish_reason == "length"
                     raw = result.content
                     start = raw.find("{")
-                    end = raw.rfind("}") + 1
+                    end = len(raw) if truncated else raw.rfind("}") + 1
                     if start != -1 and end > start:
                         raw = raw[start:end]
                     repaired = json_repair.loads(raw)
                     if isinstance(repaired, dict):
+                        if truncated:
+                            # Cut before a later field: keep what was written rather than fail the
+                            # parse. An empty message then takes the agent's normal empty-message path.
+                            for name, field in response_model.model_fields.items():
+                                if field.is_required() and field.annotation is str:
+                                    repaired.setdefault(name, "")
                         parsed = response_model.model_validate(repaired)
                 except Exception as exc:
                     logger.warning(f"structured output parse failed: {exc}")
