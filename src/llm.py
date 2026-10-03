@@ -46,6 +46,8 @@ class LLMResponse(BaseModel):
 
 
 class LLMClient:
+    n_ctx: int  # set by fetch_context_window(); unset until then, so a call before it fails loudly
+
     def __init__(self, cfg: LLMConfig) -> None:
         self._cfg = cfg
         self._schema_tools: list[dict] = []
@@ -67,8 +69,17 @@ class LLMClient:
                 logger.info(f"waiting for LLM to be ready: {exc}")
                 await asyncio.sleep(5)
         # Outside the retry and without a default: a missing field must stop startup, not loop forever
-        # or hand compaction a guessed window.
-        return int((models.data[0].model_extra or {})["meta"]["n_ctx"])
+        # or size every limit from a guessed window.
+        self.n_ctx = int((models.data[0].model_extra or {})["meta"]["n_ctx"])
+        return self.n_ctx
+
+    @property
+    def max_tokens(self) -> int:
+        return int(self.n_ctx * self._cfg.max_tokens_ratio)
+
+    @property
+    def reasoning_budget(self) -> int:
+        return int(self.n_ctx * self._cfg.reasoning_budget_ratio)
 
     async def embed(self, text: str) -> np.ndarray | None:
         """Generate embedding via /v1/embeddings. Uses embeddings_url if set, else base_url."""
@@ -103,12 +114,12 @@ class LLMClient:
         kwargs: dict[str, Any] = {
             "model": "local",  # llama.cpp ignores this field
             "messages": messages,
-            "max_tokens": max_tokens or self._cfg.max_tokens,
+            "max_tokens": max_tokens or self.max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
             "extra_body": {
                 "chat_template_kwargs": {"enable_thinking": thinking},
-                "reasoning_budget_tokens": self._cfg.reasoning_budget,
+                "reasoning_budget_tokens": self.reasoning_budget,
                 "reasoning_budget_message": self._cfg.reasoning_budget_message,
             },
         }

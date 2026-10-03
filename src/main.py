@@ -31,8 +31,11 @@ async def main() -> None:
     memory = MemoryManager(llm, cfg.tools, store)
 
     model_ctx = await llm.fetch_context_window()
-    context_limit = cfg.llm.max_context if cfg.llm.max_context > 0 else model_ctx
-    logger.info(f"context limit: {context_limit} (model reports {model_ctx})")
+    context_limit = int(model_ctx * cfg.llm.compaction_trigger_ratio)
+    logger.info(
+        f"context window {model_ctx}: compaction at {context_limit}, max_tokens {llm.max_tokens}, "
+        f"thinking budget {llm.reasoning_budget}"
+    )
     ctx = ContextManager(
         context_limit,
         keep_recent=cfg.tools.memory_keep_recent,

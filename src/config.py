@@ -114,16 +114,18 @@ class SamplingConfig(BaseModel):
 class LLMConfig(BaseModel):
     base_url: str = "http://localhost:8080/v1"
     embeddings_url: str = ""  # separate embedding server; falls back to base_url if empty
-    # Thinking counts against max_tokens, so without a budget a think block alone could use it all
-    # and return no content and no tool call. llama.cpp's reasoning budget closes the think block at
-    # reasoning_budget (forcing the message + end tag), which always leaves the remaining 4096 tokens
-    # for the tool call or answer. Prompt (compaction at 32768) + 20480 fits the server's 65536.
-    max_tokens: int = 20480
-    reasoning_budget: int = 16384
+    # Token limits are *_ratio fractions of the context window the server reports (llama.cpp
+    # meta.n_ctx), so they follow the server's -c. Thinking counts against max_tokens, so without a
+    # budget a think block alone could use it all and return no content and no tool call. llama.cpp
+    # closes the think block at the reasoning budget (forcing the message + end tag), which leaves
+    # max_tokens - budget (0.125 of the window) for the tool call or answer. A prompt at the
+    # compaction trigger plus a full reply (0.5 + 0.375) still fits the window.
+    compaction_trigger_ratio: float = 0.5  # compact once a prompt exceeds this much of the window
+    max_tokens_ratio: float = 0.375  # output cap per call, thinking included
+    reasoning_budget_ratio: float = 0.25
     reasoning_budget_message: str = "… [thinking budget reached — act on the reasoning above now]"
-    max_context: int = 32768  # practical context limit for compaction (0 = use model's reported window)
     max_history_messages: int = 100  # also triggers compaction when history exceeds this many messages
-    compaction_keep_ratio: float = 0.25  # fraction of history to keep after compaction (rest is summarized)
+    compaction_keep_ratio: float = 0.25  # fraction of the HISTORY kept after compaction (rest is summarized)
     enable_thinking: bool = True
     # Picked per call by its enable_thinking, e.g. LLM__SAMPLING_INSTRUCT__PRESENCE_PENALTY=1.5.
     sampling_thinking: SamplingConfig = SamplingConfig()

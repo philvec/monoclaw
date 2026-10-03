@@ -74,7 +74,10 @@ monoclaw runs as a single Docker container. Bridges run separately and connect t
 llm:
   base_url: http://your-llama-cpp-host:8080/v1
   embeddings_url: http://your-embedding-server:8090/v1  # optional, falls back to base_url
-  max_tokens: 4096
+  # token limits are fractions of the context window the server reports (llama.cpp meta.n_ctx)
+  compaction_trigger_ratio: 0.5  # compact once a prompt exceeds this much of the window
+  max_tokens_ratio: 0.375        # output cap per call, thinking included
+  reasoning_budget_ratio: 0.25   # llama.cpp closes the think block here, leaving the rest for the reply
   sampling_instruct:            # used when enable_thinking is off; sampling_thinking when on
     temperature: 0.7            # temperature/top_p/top_k/min_p/presence_penalty/repeat_penalty,
     presence_penalty: 1.5       # unset = server default (env: LLM__SAMPLING_INSTRUCT__TEMPERATURE)
