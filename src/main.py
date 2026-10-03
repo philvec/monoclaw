@@ -83,7 +83,7 @@ async def main() -> None:
             return  # immediate: the layer answered and recorded the turn
 
         # Build the per-turn context (channel + datetime) here, at the dispatch layer, and prepend
-        # any fast-classifier error note. Both travel to the agent via the ephemeral `preamble`.
+        # any fast-classifier error note. Both travel to the agent via `preamble`.
         ctx = build_channel_ctx(msg.channel)
         error_note = decision.preamble if decision is not None else None
         preamble = f"{error_note}\n{ctx}" if error_note else ctx

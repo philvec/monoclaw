@@ -484,10 +484,10 @@ class AgentLoop:
             history = self._histories[msg.channel] = []
         messages.extend(history)
 
-        # Ephemeral pre-message note built by the dispatch layer (main.on_message / handle_cron):
-        # channel + datetime context, plus any fast-classifier error. Included in THIS turn's prompt
-        # (system role isn't allowed mid-conversation, so it's a user note) but never persisted to
-        # history — the datetime is regenerated every turn and old errors shouldn't linger.
+        # Pre-message note built by the dispatch layer (main.on_message / handle_cron): channel +
+        # datetime context, plus any fast-classifier error. A user note because system role isn't
+        # allowed mid-conversation. It is persisted with the turn — history is built from `messages`
+        # below — so past turns keep their timestamps (and any classifier error).
         if preamble:
             messages.append(ChatCompletionUserMessageParam(role="user", content=preamble))
 
