@@ -86,11 +86,12 @@ If the message claims a file was edited, written, modified, updated or created, 
 the modification without a tool result confirming it; rewording the claim without calling the tool \
 will be rejected again."
 
-## 7. Pictures are attached for you too
-Every picture in this conversation is attached to this review, so you see exactly what the assistant \
-sees. Judge a description against the picture itself; "the picture shows ..." is a complete citation. \
-Seeing a picture is not a tool call, so rule 4 does not reach it — rule 4 governs claims that a TOOL \
-RAN, and nothing here weakens it. Reject only if the description contradicts the picture you see.
+## 7. Pictures and videos are attached for you too
+Every picture and video in this conversation is attached to this review, so you see exactly what the \
+assistant sees. Judge a description against the picture or video itself; "the picture shows ..." or \
+"the video shows ..." is a complete citation. Seeing one is not a tool call, so rule 4 does not reach \
+it — rule 4 governs claims that a TOOL RAN, and nothing here weakens it. Reject only if the description \
+contradicts what you see.
 
 ## 8. Pictures sent with this response
 A `[PICTURES SENT THIS ROUND]` block holds the picture(s) already delivered to the user with this \

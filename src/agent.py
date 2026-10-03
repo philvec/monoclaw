@@ -53,7 +53,8 @@ _HISTORY_DIR = Path("./data/history")  # one <quoted channel>.jsonl per channel,
 # written back to history and onto disk. History therefore stays str-only and carries markers;
 # _with_images expands them into content parts at the llm.chat() boundary only, on a copy.
 IMAGE_MARKER_PREFIX = "[IMAGE "
-_IMAGE_MARKER = re.compile(r"^\[IMAGE ([^\s\]]+) (image/[^\s\]]+)\]$")
+# Videos ride the same marker with a video/* mime: same storage, same expansion window, same stripping.
+_IMAGE_MARKER = re.compile(r"^\[IMAGE ([^\s\]]+) ((?:image|video)/[^\s\]]+)\]$")
 MAX_REEL_IMAGES = 4  # pictures kept visible in the prompt; each was already sent when it was made
 # Answer already HAS a reasoning field — `justification` — so a think block reasons twice and throws
 # the expensive copy away. Worse, reasoning is billed against max_tokens but arrives in a separate
@@ -73,15 +74,25 @@ def _persist_user_content(msg: InboundMessage) -> str:
     notes: list[str] = []
     for i, img in enumerate(msg.images):
         raw = base64.b64decode(img.data, validate=True)
-        try:
-            # Convert here, not at read time: storing something the backend cannot decode would
-            # make every later turn fail, not just this one.
-            data, mime = to_decodable_image(raw, img.mime)
-        except Exception as exc:
-            logger.warning(f"undecodable inbound image from {msg.channel!r} ({img.mime}): {exc}")
-            notes.append(f"[obrazek {img.name or i} w nieobsługiwanym formacie ({img.mime}) — nie widzę go]")
-            continue
-        fname = f"{msg.timestamp}-{i}{IMAGE_MIME_EXT.get(mime) or '.img'}"
+        if img.mime.startswith("video/"):
+            # No decoder here to verify a video, so accept only what the signal-bridge produces
+            # (ffmpeg re-encoded MP4): an undecodable one would 400 every later turn, like a bad image.
+            if img.mime != "video/mp4" or raw[4:8] != b"ftyp":
+                logger.warning(f"inbound video from {msg.channel!r} is not an MP4 ({img.mime}), dropped")
+                notes.append(f"[film {img.name or i} w nieobsługiwanym formacie ({img.mime}) — nie widzę go]")
+                continue
+            data, mime, ext = raw, img.mime, ".mp4"
+        else:
+            try:
+                # Convert here, not at read time: storing something the backend cannot decode would
+                # make every later turn fail, not just this one.
+                data, mime = to_decodable_image(raw, img.mime)
+            except Exception as exc:
+                logger.warning(f"undecodable inbound image from {msg.channel!r} ({img.mime}): {exc}")
+                notes.append(f"[obrazek {img.name or i} w nieobsługiwanym formacie ({img.mime}) — nie widzę go]")
+                continue
+            ext = IMAGE_MIME_EXT.get(mime) or ".img"
+        fname = f"{msg.timestamp}-{i}{ext}"
         (IMAGES_DIR / fname).write_bytes(data)
         markers.append(f"{IMAGE_MARKER_PREFIX}{fname} {mime}]")
     logger.info(f"🖼️ stored {len(markers)} image(s) from {msg.channel!r} in {IMAGES_DIR}")
@@ -113,10 +124,15 @@ def _expand_markers(content: str) -> list[ChatCompletionContentPartParam]:
         # basename only: marker text is attacker-reachable (a user can type one, and the agent can
         # write one via its file tools), so never let it escape IMAGES_DIR — cf. tools._safe_path.
         data = (IMAGES_DIR / Path(m.group(1)).name).read_bytes()
+        b64 = base64.b64encode(data).decode("ascii")
+        if m.group(2).startswith("video/"):
+            # llama.cpp's own part type (decoded there with ffmpeg); not in the OpenAI SDK's types.
+            parts.append({"type": "input_video", "input_video": {"data": b64}})  # type: ignore[arg-type]
+            continue
         parts.append(
             ChatCompletionContentPartImageParam(
                 type="image_url",
-                image_url={"url": f"data:{m.group(2)};base64,{base64.b64encode(data).decode('ascii')}"},
+                image_url={"url": f"data:{m.group(2)};base64,{b64}"},
             )
         )
     if text := _strip_markers(content):
@@ -136,7 +152,8 @@ def _newest_image(reel: list[str], messages: list[ChatCompletionMessageParam]) -
         for m in reversed(messages):
             if m.get("role") != "user" or not isinstance(c := m.get("content"), str):
                 continue
-            if found := [ln for ln in c.split("\n") if _IMAGE_MARKER.match(ln)]:
+            # pictures only: a video marker shares the format but is nothing edit_image can open
+            if found := [ln for ln in c.split("\n") if (x := _IMAGE_MARKER.match(ln)) and x.group(2)[:6] == "image/"]:
                 line = found[-1]
                 break
     if (mm := _IMAGE_MARKER.match(line)) is None:
@@ -253,7 +270,7 @@ def _with_images(
             expanded += 1
     for i, m in enumerate(out):
         if isinstance(c := m.get("content"), str) and c.startswith(IMAGE_MARKER_PREFIX):
-            out[i] = {**m, "content": _strip_markers(c) or "(picture not shown)"}  # type: ignore[call-overload]
+            out[i] = {**m, "content": _strip_markers(c) or "(attachment not shown)"}  # type: ignore[call-overload]
     return out
 
 
@@ -265,7 +282,7 @@ _SCHEMA_INSTRUCTIONS = (
     "named tool result (e.g. 'web_search returned empty'), "
     + ("named memory entry (e.g. 'memory user-prefers-polish'), " if MEMORY_ENABLED else "")
     + "quoted past message, exact channel rule, "
-    "or a picture you can see (cite as 'the picture shows X').\n"
+    "or a picture or video you can see (cite as 'the picture shows X' / 'the video shows X').\n"
     "- Every picture you draw, change or fetch is sent to the user as you make it.\n"
     "- For any admission of inability (e.g. 'I don't have that data', 'I found nothing'): cite the tool "
     "you ran and what it returned, AND the rule that directs you to inform the user of this. "

@@ -32,6 +32,7 @@ class WebSocketChannelManager:
       - Client connects and sends a handshake with its name: {"name": "signal/bob"}
       - Client sends messages: {"text": "..."} with optional
         "images": [{"mime": "image/jpeg", "data": "<base64>", "name": "photo.jpg"}]
+        (an entry may also be an MP4 video: "mime": "video/mp4")
       - Server sends replies as two frames: {"chunk": "..."} then {"end": true}
     """
 
