@@ -10,7 +10,7 @@ a constrained, structured verdict:
     output        = str
     tool_call     = { name, arguments } | null   (only when tools are configured)
 
-- "complex":   ``output`` + "..." is sent at once as a "working on it" note (not
+- "complex":   ``output`` is sent at once as a "working on it" note (not
                recorded in history), then the message falls through to the full agent.
 - "immediate" + no tool_call: the layer answers the user directly with ``output``
                and records the turn into history, without calling the big model.
@@ -192,12 +192,12 @@ class FastClassifier:
             return Decision(handled=False, preamble=f"[FAST CLASSIFIER ERROR: {exc}]")
 
         if verdict.response_mode != "immediate":
-            ack = verdict.output.strip().rstrip(".…")
+            ack = verdict.output.strip()
             if not ack:
                 logger.warning(f"⚡ COMPLEX with empty output on {msg.channel!r} — no ack sent")
                 return Decision(handled=False)
-            logger.info(f"⚡ classified COMPLEX [{msg.channel}] — ack {ack!r}..., passthrough to main agent")
-            return Decision(handled=False, ack=f"{ack}...")
+            logger.info(f"⚡ classified COMPLEX [{msg.channel}] — ack {ack!r}, passthrough to main agent")
+            return Decision(handled=False, ack=ack)
 
         if verdict.tool_call is not None:
             return await self._run_tool(msg, verdict)
