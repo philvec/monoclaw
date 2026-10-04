@@ -84,6 +84,12 @@ async def main() -> None:
             decision = None
         if decision is not None and decision.handled:
             return  # immediate: the layer answered and recorded the turn
+        if decision is not None and decision.ack:
+            # The fast "working on it" line; like the agent's interims, a failed send never blocks the turn.
+            try:
+                await channel_manager.send_full_msg(msg.channel, decision.ack)
+            except Exception as exc:
+                logger.warning(f"classifier ack to {msg.channel!r} skipped: {exc}")
 
         # Build the per-turn context (channel + datetime) here, at the dispatch layer, and prepend
         # any fast-classifier error note. Both travel to the agent via `preamble`.

@@ -10,8 +10,8 @@ a constrained, structured verdict:
     output        = str
     tool_call     = { name, arguments } | null   (only when tools are configured)
 
-- "complex":   the layer logs the decision and lets the message fall through to
-               the full agent, exactly as if the layer were not present.
+- "complex":   ``output`` + "..." is sent at once as a "working on it" note (not
+               recorded in history), then the message falls through to the full agent.
 - "immediate" + no tool_call: the layer answers the user directly with ``output``
                and records the turn into history, without calling the big model.
 - "immediate" + tool_call: the layer executes the whitelisted MCP tool, delivers
@@ -92,6 +92,7 @@ class FastClassification(BaseModel):
 class Decision(BaseModel):
     handled: bool = False  # True ⇒ the layer answered/acted; do NOT call the agent this turn
     preamble: str | None = None  # non-None ⇒ inject this note before the agent turn (fail-safe)
+    ack: str | None = None  # non-None ⇒ send this to the channel at once, before the agent turn
 
 
 class FastClassifier:
@@ -124,7 +125,7 @@ class FastClassifier:
             "type": "object",
             "properties": {
                 "response_mode": {"type": "string", "enum": ["immediate", "complex"]},
-                "output": {"type": "string"},
+                "output": {"type": "string", "minLength": 1},  # complex too: it is the instant ack
             },
             "required": ["response_mode", "output"],
             "additionalProperties": False,
@@ -191,8 +192,12 @@ class FastClassifier:
             return Decision(handled=False, preamble=f"[FAST CLASSIFIER ERROR: {exc}]")
 
         if verdict.response_mode != "immediate":
-            logger.info(f"⚡ classified COMPLEX [{msg.channel}] — passthrough to main agent")
-            return Decision(handled=False)
+            ack = verdict.output.strip().rstrip(".…")
+            if not ack:
+                logger.warning(f"⚡ COMPLEX with empty output on {msg.channel!r} — no ack sent")
+                return Decision(handled=False)
+            logger.info(f"⚡ classified COMPLEX [{msg.channel}] — ack {ack!r}..., passthrough to main agent")
+            return Decision(handled=False, ack=f"{ack}...")
 
         if verdict.tool_call is not None:
             return await self._run_tool(msg, verdict)
