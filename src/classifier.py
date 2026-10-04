@@ -40,7 +40,9 @@ layer can never drop, delay, or swallow a message.
 """
 
 import asyncio
+import json
 import random
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -132,6 +134,21 @@ class FastClassification(BaseModel):
     response_mode: Literal["immediate", "complex"]
     output: str = ""
     tool_call: ToolCall | None = None
+
+
+def _complete_tool_call(content: str) -> ToolCall | None:
+    """The streamed verdict's tool_call once its JSON object is complete, if the verdict is immediate.
+    language and response_mode are enums, so the first "tool_call" key is the real one."""
+    if not re.search(r'"response_mode"\s*:\s*"immediate"', content) or (i := content.find('"tool_call"')) < 0:
+        return None
+    j = content.find(":", i) + 1
+    while j < len(content) and content[j].isspace():
+        j += 1
+    try:
+        value, _ = json.JSONDecoder().raw_decode(content, j)  # raises until the object has closed
+    except json.JSONDecodeError:
+        return None
+    return ToolCall.model_validate(value) if isinstance(value, dict) else None
 
 
 class Decision(BaseModel):
@@ -231,7 +248,7 @@ class FastClassifier:
             return Decision(handled=False)
 
         try:
-            verdict = await self._classify(msg)
+            verdict, tool_task = await self._classify(msg)
         except Exception as exc:
             logger.error(f"⚡ fast classifier ERROR on {msg.channel!r}: {exc}")
             return Decision(handled=False, preamble=f"[FAST CLASSIFIER ERROR: {exc}]")
@@ -247,7 +264,7 @@ class FastClassifier:
             return Decision(handled=False, ack=ack)
 
         if verdict.tool_call is not None:
-            return await self._run_tool(msg, verdict)
+            return await self._run_tool(msg, verdict, tool_task)
 
         # immediate, plain text answer
         preview = verdict.output[:120] + ("…" if len(verdict.output) > 120 else "")
@@ -264,7 +281,9 @@ class FastClassifier:
             return Decision(handled=False, preamble=f"[FAST CLASSIFIER ERROR: immediate delivery failed: {exc}]")
         return Decision(handled=True)
 
-    async def _run_tool(self, msg: InboundMessage, verdict: FastClassification) -> Decision:
+    async def _run_tool(
+        self, msg: InboundMessage, verdict: FastClassification, tool_task: asyncio.Task | None
+    ) -> Decision:
         tc = verdict.tool_call
         # The model's own wording ("OK, gaszę w sypialni"). tool_call precedes output in the schema, so it
         # is written after the arguments it describes.
@@ -275,10 +294,10 @@ class FastClassifier:
         logger.info(
             f"⚡ classified IMMEDIATE/tool [{msg.channel}] tool={tc.name} args={tc.arguments} → {confirmation!r}"
         )
-        # Confirmation and tool call at once; a failed action is left to the main model to correct.
+        # The tool usually started mid-stream (tool_task); a failed action is left to the main model to correct.
         sent, called = await asyncio.gather(
             self._channels.send_full_msg(msg.channel, confirmation),
-            self._mcp.call_checked(tc.name, tc.arguments),
+            tool_task or self._mcp.call_checked(tc.name, tc.arguments),
             return_exceptions=True,
         )
         ok, result = (False, f"exception: {called}") if isinstance(called, BaseException) else called
@@ -337,8 +356,10 @@ class FastClassifier:
         )
         return (resp.choices[0].message.content or "").strip()
 
-    async def _classify(self, msg: InboundMessage) -> FastClassification:
-        """Call the classifier model. Raises on any failure (caught by process())."""
+    async def _classify(self, msg: InboundMessage) -> tuple[FastClassification, asyncio.Task | None]:
+        """Call the classifier model, streaming: a tool call starts the moment its JSON is complete, while
+        ``output`` (its confirmation) is still being generated — returned as the running task. Raises on any
+        failure before a tool started (caught by process())."""
         assert self._client is not None  # guaranteed while enabled
 
         system_prompt = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8").strip()  # re-read for live edits
@@ -368,22 +389,37 @@ class FastClassifier:
             )
             schema = _MEDIA_SCHEMA
 
-        resp = await self._client.chat.completions.create(
-            model="local",  # llama.cpp ignores this field
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user},
-            ],
-            max_tokens=self._cfg.max_tokens,
-            temperature=0.0,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {"name": "FastClassification", "schema": schema},
-            },
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},  # fast path, no reasoning
-            timeout=self._cfg.timeout_s,
-        )
-        content = (resp.choices[0].message.content or "").strip() if resp.choices else ""
-        if not content:
-            raise ValueError("classifier returned empty content")
-        return FastClassification.model_validate_json(content)  # raises on invalid / unparseable output
+        content, early, tool_task = "", None, None
+        try:
+            stream = await self._client.chat.completions.create(
+                model="local",  # llama.cpp ignores this field
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=self._cfg.max_tokens,
+                temperature=0.0,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "FastClassification", "schema": schema},
+                },
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},  # fast path, no reasoning
+                timeout=self._cfg.timeout_s,
+                stream=True,
+            )
+            async for chunk in stream:
+                if not (chunk.choices and chunk.choices[0].delta.content):
+                    continue
+                content += chunk.choices[0].delta.content
+                if tool_task is None and (early := _complete_tool_call(content)):
+                    logger.info(f"⚡ tool {early.name} started mid-stream on {msg.channel!r}")
+                    tool_task = asyncio.create_task(self._mcp.call_checked(early.name, early.arguments))
+            if not content.strip():
+                raise ValueError("classifier returned empty content")
+            return FastClassification.model_validate_json(content), tool_task  # raises on invalid output
+        except Exception as exc:
+            if tool_task is None:
+                raise
+            # The action is already running: see it through, with the template confirmation.
+            logger.error(f"⚡ classifier stream failed after {early.name} started on {msg.channel!r}: {exc}")
+            return FastClassification(response_mode="immediate", tool_call=early), tool_task
