@@ -87,11 +87,11 @@ def sniff_image_mime(head: bytes) -> str:
 
 
 # Long-term memory: post-turn extraction, the pre-compaction flush, memory_search/memory_read and
-# scheduled consolidation. OFF until Filip turns it back on. MASTER.md is NOT part of this — it is
+# scheduled consolidation. Back ON since 2026-10-04, starting from an empty store. MASTER.md is NOT part of this — it is
 # still injected into the system prompt and master_memory still works, because rule 5 needs it.
 # Every prompt that names a memory tool is conditional on this flag: leaving the instructions in
 # while the tools are gone would just teach the model to call something that is not there.
-MEMORY_ENABLED = False
+MEMORY_ENABLED = True
 
 IMAGE_HISTORY_TURNS = 1  # newest USER marker messages shown as pictures; older lose their marker line
 WS_MAX_FRAME_BYTES = 16 * 1024 * 1024  # base64 images exceed the websockets default (1 MB)
