@@ -85,9 +85,12 @@ async def main() -> None:
         if decision is not None and decision.handled:
             return  # immediate: the layer answered and recorded the turn
         if decision is not None and decision.ack:
-            # The fast "working on it" line; like the agent's interims, a failed send never blocks the turn.
+            # The fast "working on it" line, then Signal's typing indicator (an empty chunk) until the agent's
+            # own; like the agent's interims, a failed send never blocks the turn.
             try:
                 await channel_manager.send_full_msg(msg.channel, decision.ack)
+                if msg.channel.startswith("signal/"):
+                    await channel_manager.send_chunk(msg.channel, "")
             except Exception as exc:
                 logger.warning(f"classifier ack to {msg.channel!r} skipped: {exc}")
 
