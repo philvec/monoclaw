@@ -52,11 +52,41 @@ from config import CRON_CHANNEL, ClassifierConfig, logger
 # Beside MASTER.md in the (gitignored) data volume; re-read per message for live edits.
 SYSTEM_PROMPT_PATH = Path("./data/memory/fast_classifier_system.md")
 
+# Qwen3.5's languages and dialects, one family per line, from the table in its release blog
+# (qwen.ai/blog?id=qwen3.5). The `language` enum: free text gave "pl" and once "complex".
+_LANGUAGES = [lang for family in (
+    "English, French, Portuguese, German, Romanian, Swedish, Danish, Bulgarian, Russian, Czech, Greek, Ukrainian, "
+    "Spanish, Dutch, Slovak, Croatian, Polish, Lithuanian, Norwegian Bokmål, Norwegian Nynorsk, Persian, Slovenian, "
+    "Gujarati, Latvian, Italian, Occitan, Nepali, Marathi, Belarusian, Serbian, Luxembourgish, Venetian, Assamese, "
+    "Welsh, Silesian, Asturian, Chhattisgarhi, Awadhi, Maithili, Bhojpuri, Sindhi, Irish, Faroese, Hindi, Punjabi, "
+    "Bengali, Oriya, Tajik, Eastern Yiddish, Lombard, Ligurian, Sicilian, Friulian, Sardinian, Galician, Catalan, "
+    "Icelandic, Tosk Albanian, Limburgish, Dari, Afrikaans, Macedonian, Sinhala, Urdu, Magahi, Bosnian, Armenian, "
+    "Latgalian, Scottish Gaelic, Central Kurdish, Northern Kurdish, Southern Pashto, Sanskrit, Dhundari, Marwari, "
+    "Ahirani, Bagheli, Bagri, Bundeli, Braj, Kumaoni, Kashmiri",
+    "Simplified Chinese, Traditional Chinese, Cantonese, Burmese, Standard Tibetan, Meitei",
+    "Arabic, Najdi Arabic, Levantine Arabic, Egyptian Arabic, Moroccan Arabic, Mesopotamian Arabic, "
+    "Ta'izzi-Adeni Arabic, Tunisian Arabic, Gulf Arabic, Algerian Arabic, Sudanese Arabic, Libyan Arabic, Hebrew, "
+    "Maltese, Amharic, Tigrinya, Kabyle, Somali, West Central Oromo, Hausa",
+    "Indonesian, Malay, Tagalog, Cebuano, Javanese, Sundanese, Minangkabau, Balinese, Banjar, Pangasinan, Iloko, "
+    "Waray (Philippines), Plateau Malagasy, Malagasy, Buginese, Maori, Samoan, Hawaiian, Fijian",
+    "Tamil, Telugu, Kannada, Malayalam",
+    "Turkish, North Azerbaijani, Northern Uzbek, Kazakh, Bashkir, Tatar, Crimean Tatar, Kyrgyz, Turkmen, Uyghur",
+    "Thai, Lao, Shan",
+    "Finnish, Estonian, Hungarian, Meadow Mari",
+    "Vietnamese, Khmer",
+    "Yoruba, Ewe, Kinyarwanda, Lingala, Northern Sotho, Nyanja, Shona, Southern Sotho, Tswana, Xhosa, Zulu, Luganda, "
+    "Swati, Tsonga, Tumbuka, Venda, Chokwe, Luba-Kasai, Rundi, Umbundu, Kikuyu, Kongo, Nigerian Fulfulde, Wolof, Fon, "
+    "Kabiyè, Mossi, Akan, Twi, Bambara, Igbo",
+    "Japanese, Korean, Georgian, Basque, Haitian, Papiamento, Kabuverdianu, Tok Pisin, Swahili, Central Aymara, Tulu, "
+    "Nagamese, Nigerian Pidgin, Mauritian Creole, Sango, Ayacucho Quechua, Halh Mongolian, Southwestern Dinka, Nuer, "
+    "Guarani",
+) for lang in family.split(", ")]
+
 # Photo/video messages: complex only, no tool call — the classifier cannot see what it would act on.
 _MEDIA_SCHEMA = {
     "type": "object",
     "properties": {
-        "language": {"type": "string", "minLength": 1},
+        "language": {"type": "string", "enum": _LANGUAGES},
         "response_mode": {"type": "string", "enum": ["complex"]},
         "output": {"type": "string", "minLength": 1},
     },
@@ -139,7 +169,7 @@ class FastClassifier:
         schema: dict[str, Any] = {
             "type": "object",
             "properties": {
-                "language": {"type": "string", "minLength": 1},  # of the conversation: the ack's language
+                "language": {"type": "string", "enum": _LANGUAGES},  # of the conversation: the ack's language
                 "response_mode": {"type": "string", "enum": ["immediate", "complex"]},
                 "output": {"type": "string", "minLength": 1},  # complex too: it is the instant ack
             },
