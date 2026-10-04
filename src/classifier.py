@@ -136,6 +136,14 @@ class FastClassification(BaseModel):
     tool_call: ToolCall | None = None
 
 
+def _is_json(text: str) -> bool:
+    """A verdict leaked into a user-facing field: a whole tool-call JSON once arrived as `output`."""
+    try:
+        return isinstance(json.loads(text), (dict, list))
+    except ValueError:
+        return False
+
+
 def _complete_tool_call(content: str) -> ToolCall | None:
     """The streamed verdict's tool_call once its JSON object is complete, if the verdict is immediate.
     language and response_mode are enums, so the first "tool_call" key is the real one."""
@@ -255,8 +263,8 @@ class FastClassifier:
 
         if verdict.response_mode != "immediate":
             ack = verdict.output.strip()
-            if not ack:
-                logger.warning(f"⚡ COMPLEX with empty output on {msg.channel!r} — no ack sent")
+            if not ack or _is_json(ack):
+                logger.warning(f"⚡ COMPLEX with empty or JSON output {ack!r} on {msg.channel!r} — no ack sent")
                 return Decision(handled=False)
             logger.info(
                 f"⚡ classified COMPLEX [{msg.channel}] [{verdict.language}] — ack {ack!r}, passthrough to main agent"
@@ -275,6 +283,9 @@ class FastClassifier:
             # message would die here: no reply, no agent, no reviewer. Never a valid outcome.
             logger.warning(f"⚡ IMMEDIATE with empty output on {msg.channel!r} — passthrough to main agent")
             return Decision(handled=False, preamble="[FAST CLASSIFIER ERROR: immediate answer was empty]")
+        if _is_json(verdict.output):
+            logger.warning(f"⚡ IMMEDIATE answer is raw JSON on {msg.channel!r} — passthrough to main agent")
+            return Decision(handled=False, preamble="[FAST CLASSIFIER ERROR: immediate answer was raw JSON, not sent]")
         try:
             await self._agent.record_immediate(msg, verdict.output)
         except Exception as exc:
@@ -291,9 +302,9 @@ class FastClassifier:
         # The model's own wording ("OK, gaszę w sypialni"). tool_call precedes output in the schema, so it
         # is written after the arguments it describes.
         confirmation = verdict.output.strip()
-        if not confirmation:
+        if not confirmation or _is_json(confirmation):
+            logger.warning(f"⚡ tool {tc.name}: output {confirmation!r} on {msg.channel!r} — template confirmation")
             confirmation = random.choice(_CONFIRM_TEMPLATES).format(subject=self._tool_summary(tc))
-            logger.warning(f"⚡ tool {tc.name}: output empty on {msg.channel!r} — template confirmation")
         logger.info(
             f"⚡ classified IMMEDIATE/tool [{msg.channel}] tool={tc.name} args={tc.arguments} → {confirmation!r}"
         )
@@ -306,7 +317,6 @@ class FastClassifier:
         ok, result = (False, f"exception: {called}") if isinstance(called, BaseException) else called
         if not isinstance(sent, BaseException):
             msg.replies.append(confirmation)
-        msg.replies.append(f"{tc.name}({json.dumps(tc.arguments, ensure_ascii=False)}) → {str(result)[:200]}")
         if not ok:
             logger.error(f"⚡ tool {tc.name} failed on {msg.channel!r}: {result}")
             if msg.channel.startswith("signal/"):
@@ -380,9 +390,10 @@ class FastClassifier:
         )
         # Without the replies it answers, a follow-up reads as a standalone message: "Dobrze zgadłeś!" was
         # echoed back, and "To jestem ja, Filip" (naming a person in a photo) got a fresh greeting. All of
-        # them, tool calls included, even mid-turn: "Teraz zgaś" sent while a lamp was still being switched
-        # on, shown only the last finished reply (a drawing's description), switched off "the drawing".
-        # Never the previous message itself: the small model would answer that one instead.
+        # them, even mid-turn: "Teraz zgaś" sent while a lamp was still being switched on, shown only the last
+        # finished reply (a drawing's description), switched off "the drawing". Text only — a raw tool-call
+        # line made a bare "Zgaś" pick the kitchen. Never the previous message itself: the small model would
+        # answer that one instead.
         user = f"Message: {msg.text}"
         replies, answered = self._agent.previous_replies(msg)
         if replies:

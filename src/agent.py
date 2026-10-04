@@ -422,7 +422,7 @@ class AgentLoop:
             await self._warm_reviewer_cache(channel)
 
     def previous_replies(self, msg: InboundMessage) -> tuple[list[str], bool]:
-        """Everything said and done in reply to the channel's previous message, and whether that turn is
+        """Everything said in reply to the channel's previous message, and whether that turn is
         over — the fast classifier's context, live even mid-turn. ``msg`` becomes the channel's latest.
         Before any message since startup, the newest reply in history stands in."""
         prev, self._latest[msg.channel] = self._latest.get(msg.channel), msg
@@ -707,7 +707,6 @@ class AgentLoop:
                             except Exception as exc:
                                 logger.warning(f"picture delivery to {msg.channel!r} skipped: {exc}")
                     messages.append(ChatCompletionToolMessageParam(role="tool", tool_call_id=tc.id, content=result))
-                    msg.replies.append(f"{tc.name}({json.dumps(tc.arguments, ensure_ascii=False)}) → {result[:200]}")
                 continue
 
             # No tool calls — Phase 2: structured call (response_format enforced, no real tools)

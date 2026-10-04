@@ -22,7 +22,7 @@ class InboundMessage(BaseModel):
     text: str
     timestamp: int
     images: list[InboundImage] = []
-    # Everything said and done in reply, in order (fast classifier + agent), and whether the turn is
+    # Everything said in reply, in order (fast classifier + agent), and whether the turn is
     # over — the next message's fast-classifier context.
     replies: list[str] = []
     answered: bool = False
