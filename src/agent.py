@@ -383,6 +383,7 @@ class AgentLoop:
         # slot, and tool_registry.current_channel is a single field.
         self._lock = asyncio.Lock()
         self._histories: dict[str, list[ChatCompletionMessageParam]] = {}
+        self._latest: dict[str, InboundMessage] = {}  # per channel — see previous_replies()
         self._foreground_count = 0
         self._foreground_idle = asyncio.Event()
         self._foreground_idle.set()
@@ -420,15 +421,17 @@ class AgentLoop:
             await self._warm_cache(channel)
             await self._warm_reviewer_cache(channel)
 
-    def last_reply(self, channel: str) -> tuple[str, int]:
-        """The channel's newest reply and how many history messages precede it — the fast classifier's
-        only context. ("", 0) while the channel has no reply yet."""
-        history = self._history(channel)
-        for i in range(len(history) - 1, -1, -1):
-            m = history[i]
+    def previous_replies(self, msg: InboundMessage) -> tuple[list[str], bool]:
+        """Everything said and done in reply to the channel's previous message, and whether that turn is
+        over — the fast classifier's context, live even mid-turn. ``msg`` becomes the channel's latest.
+        Before any message since startup, the newest reply in history stands in."""
+        prev, self._latest[msg.channel] = self._latest.get(msg.channel), msg
+        if prev is not None:
+            return list(prev.replies), prev.answered
+        for m in reversed(self._history(msg.channel)):
             if m.get("role") == "assistant" and not m.get("tool_calls") and isinstance(c := m.get("content"), str) and c:
-                return c, i
-        return "", 0
+                return [c], True
+        return [], True
 
     def _history(self, channel: str) -> list[ChatCompletionMessageParam]:
         """The channel's history, read from its checkpoint on first use. Every reader and writer goes
@@ -448,6 +451,7 @@ class AgentLoop:
             async with self._lock:
                 await self._process(msg, preamble)
         finally:
+            msg.answered = True
             self._foreground_count -= 1
             if self._foreground_count == 0:
                 self._foreground_idle.set()
@@ -615,6 +619,7 @@ class AgentLoop:
                         logger.info(f"📤 delivering interim to {msg.channel!r}: {preview!r}")
                         try:
                             await self._channel_manager.send_full_msg(msg.channel, interim)
+                            msg.replies.append(interim)
                         except Exception as exc:
                             logger.warning(f"interim delivery to {msg.channel!r} skipped: {exc}")
 
@@ -702,6 +707,7 @@ class AgentLoop:
                             except Exception as exc:
                                 logger.warning(f"picture delivery to {msg.channel!r} skipped: {exc}")
                     messages.append(ChatCompletionToolMessageParam(role="tool", tool_call_id=tc.id, content=result))
+                    msg.replies.append(f"{tc.name}({json.dumps(tc.arguments, ensure_ascii=False)}) → {result[:200]}")
                 continue
 
             # No tool calls — Phase 2: structured call (response_format enforced, no real tools)
@@ -811,6 +817,7 @@ class AgentLoop:
                 try:
                     # Text only: every picture went out on its own the moment the tool made it.
                     await self._channel_manager.send_full_msg(msg.channel, initial_answer.message)
+                    msg.replies.append(initial_answer.message)
                     turn_delivered = True
                 except Exception as exc:
                     logger.warning(f"delivery to {msg.channel!r} skipped: {exc}")
@@ -843,6 +850,7 @@ class AgentLoop:
                 self._reviewer.archive_trail(messages[review_start_idx:])
                 fallback = await self._abstention_line(msg.text)
                 logger.warning(f"sending fallback to {msg.channel!r}: {fallback!r}")
+                msg.replies.append(fallback)
                 try:
                     await self._channel_manager.send_full_msg(msg.channel, fallback)
                 except Exception as exc:
@@ -856,6 +864,7 @@ class AgentLoop:
         if not turn_delivered and msg.channel != CRON_CHANNEL:
             fallback = await self._abstention_line(msg.text)
             logger.warning(f"parse retries exhausted on {msg.channel!r}, sending fallback: {fallback!r}")
+            msg.replies.append(fallback)
             try:
                 await self._channel_manager.send_full_msg(msg.channel, fallback)
             except Exception as exc:

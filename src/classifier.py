@@ -261,6 +261,7 @@ class FastClassifier:
             logger.info(
                 f"⚡ classified COMPLEX [{msg.channel}] [{verdict.language}] — ack {ack!r}, passthrough to main agent"
             )
+            msg.replies.append(ack)
             return Decision(handled=False, ack=ack)
 
         if verdict.tool_call is not None:
@@ -279,6 +280,8 @@ class FastClassifier:
         except Exception as exc:
             logger.error(f"⚡ immediate delivery failed on {msg.channel!r}: {exc}")
             return Decision(handled=False, preamble=f"[FAST CLASSIFIER ERROR: immediate delivery failed: {exc}]")
+        msg.replies.append(verdict.output)
+        msg.answered = True
         return Decision(handled=True)
 
     async def _run_tool(
@@ -301,6 +304,9 @@ class FastClassifier:
             return_exceptions=True,
         )
         ok, result = (False, f"exception: {called}") if isinstance(called, BaseException) else called
+        if not isinstance(sent, BaseException):
+            msg.replies.append(confirmation)
+        msg.replies.append(f"{tc.name}({json.dumps(tc.arguments, ensure_ascii=False)}) → {str(result)[:200]}")
         if not ok:
             logger.error(f"⚡ tool {tc.name} failed on {msg.channel!r}: {result}")
             if msg.channel.startswith("signal/"):
@@ -314,6 +320,7 @@ class FastClassifier:
             logger.error(f"⚡ confirmation delivery failed on {msg.channel!r}: {sent}")
             return Decision(handled=False, preamble=f"[FAST CLASSIFIER ERROR: confirmation delivery failed: {sent}]")
         logger.info(f"⚡ tool {tc.name} ok → {result!r}")
+        msg.answered = True
         try:
             await self._agent.record_immediate(msg, confirmation, delivered=True)
         except Exception as exc:
@@ -371,12 +378,20 @@ class FastClassifier:
             "\n\nOUTPUT FORMAT: return the verdict as compact single-line JSON, with no spaces, indentation "
             "or newlines (minified)."
         )
-        # Without the reply it answers, a follow-up reads as a standalone message: "Dobrze zgadłeś!" was
-        # echoed back, and "To jestem ja, Filip" (naming a person in a photo) got a fresh greeting.
+        # Without the replies it answers, a follow-up reads as a standalone message: "Dobrze zgadłeś!" was
+        # echoed back, and "To jestem ja, Filip" (naming a person in a photo) got a fresh greeting. All of
+        # them, tool calls included, even mid-turn: "Teraz zgaś" sent while a lamp was still being switched
+        # on, shown only the last finished reply (a drawing's description), switched off "the drawing".
+        # Never the previous message itself: the small model would answer that one instead.
         user = f"Message: {msg.text}"
-        reply, earlier = self._agent.last_reply(msg.channel)
-        if reply:
-            user = f"Previous assistant reply ({earlier} earlier messages not shown):\n{reply}\n\n{user}"
+        replies, answered = self._agent.previous_replies(msg)
+        if replies:
+            lines = "\n".join(f"- {r}" for r in replies)
+            state = "" if answered else " (still in progress)"
+            user = (
+                f"[… previous conversation messages trimmed]\nResponses to the previous message{state}:\n{lines}"
+                f"\n\n{user}"
+            )
         schema = self._response_schema
         if msg.images:
             # The model runs without an mmproj: it would answer confidently about media it cannot see, so
