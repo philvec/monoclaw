@@ -241,7 +241,7 @@ class MemoryStore:
             vector_scores = self._vector_scores(query_embedding, mem_type=mem_type)
 
         # Step 3: hybrid merge
-        candidates = self._hybrid_merge(fts_results, vector_scores)
+        candidates = self._hybrid_merge(fts_results, vector_scores, n_vector=limit * 3)
 
         # Step 4: MMR re-ranking
         if query_embedding is not None and candidates:
@@ -311,7 +311,9 @@ class MemoryStore:
             scores[slug] = max(0.0, sim) * decay
         return scores
 
-    def _hybrid_merge(self, fts_results: list[dict], vector_scores: dict[str, float]) -> list[SearchResult]:
+    def _hybrid_merge(
+        self, fts_results: list[dict], vector_scores: dict[str, float], n_vector: int
+    ) -> list[SearchResult]:
         alpha = self._embedding_weight
         merged: dict[str, SearchResult] = {}
 
@@ -330,9 +332,11 @@ class MemoryStore:
                 score=score,
             )
 
-        # add vector-only results not found by FTS
-        for slug, vec_score in vector_scores.items():
-            if slug not in merged and vec_score > 0.3:
+        # add the best vector-only results, as many as FTS candidates. A fixed cut-off (> 0.3) on this
+        # decayed score dropped every memory older than a few weeks: decay floors at 0.3, cosine is ~0.5-0.7.
+        top_vector = sorted(vector_scores.items(), key=lambda kv: kv[1], reverse=True)[:n_vector]
+        for slug, vec_score in top_vector:
+            if slug not in merged:
                 entry = self.get(slug)
                 if entry:
                     merged[slug] = SearchResult(

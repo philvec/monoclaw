@@ -138,7 +138,9 @@ class ToolsConfig(BaseModel):
     memory_msg_max_len: int = 500
     memory_keep_recent: int = 10
     memory_decay_halflife_days: int = 30
-    memory_embedding_weight: float = 0.6
+    # 1.0 = rank by vector score alone; keyword hits only add candidates. The OR-of-all-words FTS score
+    # mostly added noise: on 765 memories R@5 0.28 at 0.6 vs 0.58 at 1.0 (aged), 0.40 vs 0.78 (fresh).
+    memory_embedding_weight: float = 1.0
     memory_mmr_lambda: float = 0.7
     memory_consolidation_cron: str = ""
 
