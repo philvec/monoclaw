@@ -6,12 +6,14 @@ Sits between the WebSocket transport (channels.py) and the Monoclaw agent
 local model (e.g. Qwen3.5-2B on the llama-cpp-classifier service) which returns
 a constrained, structured verdict:
 
+    language      = str (of the conversation)
     response_mode = "immediate" | "complex"
     output        = str
     tool_call     = { name, arguments } | null   (only when tools are configured)
 
-- "complex":   ``output`` is sent at once as a "working on it" note (not
-               recorded in history), then the message falls through to the full agent.
+- "complex":   ``output`` is sent at once as a "working on it" note (not recorded in
+               history), then the message falls through to the full agent. Photos/videos
+               are always complex.
 - "immediate" + no tool_call: the layer answers the user directly with ``output``
                and records the turn into history, without calling the big model.
 - "immediate" + tool_call: the layer executes the whitelisted MCP tool, delivers
@@ -50,6 +52,18 @@ from config import CRON_CHANNEL, ClassifierConfig, logger
 # Beside MASTER.md in the (gitignored) data volume; re-read per message for live edits.
 SYSTEM_PROMPT_PATH = Path("./data/memory/fast_classifier_system.md")
 
+# Photo/video messages: complex only, no tool call — the classifier cannot see what it would act on.
+_MEDIA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "language": {"type": "string", "minLength": 1},
+        "response_mode": {"type": "string", "enum": ["complex"]},
+        "output": {"type": "string", "minLength": 1},
+    },
+    "required": ["language", "response_mode", "output"],
+    "additionalProperties": False,
+}
+
 # Confirmation phrasings for a completed tool action. The classifier's own `output` (a short human
 # action subject) is logged but never delivered raw — it fills {subject}. User-facing → Polish.
 _CONFIRM_TEMPLATES = [
@@ -84,6 +98,7 @@ class FastClassification(BaseModel):
     (``FastClassifier._build_response_schema``) so tool arguments are grammar-constrained
     per the MCP tool's own inputSchema; this model parses the result loosely."""
 
+    language: str = ""
     response_mode: Literal["immediate", "complex"]
     output: str = ""
     tool_call: ToolCall | None = None
@@ -124,10 +139,11 @@ class FastClassifier:
         schema: dict[str, Any] = {
             "type": "object",
             "properties": {
+                "language": {"type": "string", "minLength": 1},  # of the conversation: the ack's language
                 "response_mode": {"type": "string", "enum": ["immediate", "complex"]},
                 "output": {"type": "string", "minLength": 1},  # complex too: it is the instant ack
             },
-            "required": ["response_mode", "output"],
+            "required": ["language", "response_mode", "output"],
             "additionalProperties": False,
         }
         if self._tool_schemas:
@@ -178,11 +194,7 @@ class FastClassifier:
 
     async def process(self, msg: InboundMessage) -> Decision:
         """Classify one inbound message and decide routing. Never raises."""
-        if not self.enabled or not msg.text or msg.images or msg.channel == CRON_CHANNEL:
-            if msg.images:
-                # the classifier model runs without an mmproj: shown a caption but not the picture it
-                # would answer confidently about an image it cannot see. Hand it to the agent instead.
-                logger.info(f"⚡ image message on {msg.channel!r} — classifier has no vision, passthrough")
+        if not self.enabled or not (msg.text or msg.images) or msg.channel == CRON_CHANNEL:
             return Decision(handled=False)
 
         try:
@@ -196,7 +208,9 @@ class FastClassifier:
             if not ack:
                 logger.warning(f"⚡ COMPLEX with empty output on {msg.channel!r} — no ack sent")
                 return Decision(handled=False)
-            logger.info(f"⚡ classified COMPLEX [{msg.channel}] — ack {ack!r}, passthrough to main agent")
+            logger.info(
+                f"⚡ classified COMPLEX [{msg.channel}] [{verdict.language}] — ack {ack!r}, passthrough to main agent"
+            )
             return Decision(handled=False, ack=ack)
 
         if verdict.tool_call is not None:
@@ -297,6 +311,17 @@ class FastClassifier:
         reply, earlier = self._agent.last_reply(msg.channel)
         if reply:
             user = f"Previous assistant reply ({earlier} earlier messages not shown):\n{reply}\n\n{user}"
+        schema = self._response_schema
+        if msg.images:
+            # The model runs without an mmproj: it would answer confidently about media it cannot see, so
+            # the grammar allows only complex and the note asks for a "looking at it" ack.
+            kind = "a video" if any(i.mime.startswith("video/") for i in msg.images) else "a photo"
+            user += (
+                f"\n[Attached: {kind}. You cannot see it; the full assistant will. In output, tell the user in "
+                'the language of the conversation that you are looking at it (e.g. "Patrzę na zdjęcie...", '
+                '"Oglądam filmik...", "Looking at the photo...").]'
+            )
+            schema = _MEDIA_SCHEMA
 
         resp = await self._client.chat.completions.create(
             model="local",  # llama.cpp ignores this field
@@ -308,7 +333,7 @@ class FastClassifier:
             temperature=0.0,
             response_format={
                 "type": "json_schema",
-                "json_schema": {"name": "FastClassification", "schema": self._response_schema},
+                "json_schema": {"name": "FastClassification", "schema": schema},
             },
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},  # fast path, no reasoning
             timeout=self._cfg.timeout_s,

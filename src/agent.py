@@ -317,7 +317,7 @@ _CLASSIFIER_INSTRUCTIONS = (
     "FAST PRE-AGENT CLASSIFIER:\n"
     "Before a message reaches you, every WebSocket message first passes through a fast, local "
     "classification layer (a small Qwen3.5-2B model). It returns structured output with a fixed, "
-    "immutable schema: response_mode ('immediate' or 'complex'), output (text), and — when tools are "
+    "immutable schema: language, response_mode ('immediate' or 'complex'), output (text), and — when tools are "
     "configured — an optional tool_call.\n"
     "- complex → the layer sends `output` to the user at once as a short 'working on it' note "
     "(not in your history), then the message reaches you normally.\n"
