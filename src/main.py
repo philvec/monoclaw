@@ -71,7 +71,7 @@ async def main() -> None:
     # Pre-agent input classification layer: sits right after the WebSocket
     # (channels.py) and before the Monoclaw agent. Decides per message whether to
     # answer immediately (fast path) or pass through to the full agent.
-    fast_classifier = FastClassifier(cfg.classifier, agent, mcp)
+    fast_classifier = FastClassifier(cfg.classifier, agent, mcp, channel_manager)
     fast_classifier.log_startup()
     agent.attach_abstention_line(fast_classifier.abstention_line)  # same small model words the abstention
 

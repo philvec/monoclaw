@@ -452,14 +452,15 @@ class AgentLoop:
             if self._foreground_count == 0:
                 self._foreground_idle.set()
 
-    async def record_immediate(self, msg: InboundMessage, output: str) -> None:
+    async def record_immediate(self, msg: InboundMessage, output: str, delivered: bool = False) -> None:
         """Fast-path answer from the pre-agent classifier: deliver ``output`` to the
-        channel and record the turn (user message + answer) into history WITHOUT
-        invoking the main model, so the next full turn sees what was already done.
+        channel (unless the caller already ``delivered`` it) and record the turn (user
+        message + answer) into history WITHOUT invoking the main model, so the next full
+        turn sees what was already done.
 
         Delivery happens first: if it fails, this raises before any history is written,
         letting the caller fall back to the full agent cleanly with no partial state."""
-        if msg.channel != CRON_CHANNEL:
+        if not delivered and msg.channel != CRON_CHANNEL:
             await self._channel_manager.send_full_msg(msg.channel, output)
         async with self._lock:
             history = self._history(msg.channel)

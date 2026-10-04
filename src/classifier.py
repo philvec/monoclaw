@@ -17,8 +17,8 @@ a constrained, structured verdict:
 - "immediate" + no tool_call: the layer answers the user directly with ``output``
                and records the turn into history, without calling the big model.
 - "immediate" + tool_call: the layer executes the whitelisted MCP tool, delivers
-               a short randomized confirmation, and records the turn. The big
-               model is not called this turn.
+               ``output`` as the confirmation, and records the turn. The big model
+               is not called this turn.
 
 B-hardened tool calls: the response schema is built dynamically from the MCP
 tools' own arg schemas (see ``_build_response_schema``) as a discriminated union
@@ -39,6 +39,7 @@ prefixed with a "[FAST CLASSIFIER ERROR: <msg>]" note so monoclaw can react. The
 layer can never drop, delay, or swallow a message.
 """
 
+import asyncio
 import random
 from pathlib import Path
 from typing import Any, Literal
@@ -46,7 +47,7 @@ from typing import Any, Literal
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from channels import InboundMessage
+from channels import InboundMessage, WebSocketChannelManager
 from config import CRON_CHANNEL, ClassifierConfig, logger
 
 # Beside MASTER.md in the (gitignored) data volume; re-read per message for live edits.
@@ -94,8 +95,7 @@ _MEDIA_SCHEMA = {
     "additionalProperties": False,
 }
 
-# Confirmation phrasings for a completed tool action. The classifier's own `output` (a short human
-# action subject) is logged but never delivered raw — it fills {subject}. User-facing → Polish.
+# Confirmation of a completed tool action when the classifier's `output` came back empty. User-facing → Polish.
 _CONFIRM_TEMPLATES = [
     "Wykonano: {subject}.",
     "Zrobione! {subject}.",
@@ -141,10 +141,11 @@ class Decision(BaseModel):
 
 
 class FastClassifier:
-    def __init__(self, cfg: ClassifierConfig, agent: object, mcp: object) -> None:
+    def __init__(self, cfg: ClassifierConfig, agent: object, mcp: object, channels: WebSocketChannelManager) -> None:
         self._cfg = cfg
         self._agent = agent
         self._mcp = mcp
+        self._channels = channels
         self._client: AsyncOpenAI | None = None
         self._disabled_reason: str | None = None
 
@@ -194,6 +195,8 @@ class FastClassifier:
                 )
             schema["properties"]["tool_call"] = {"anyOf": variants}
             schema["required"].append("tool_call")
+            # llama.cpp generates properties in this order: a tool confirmation follows the arguments it describes
+            schema["properties"]["output"] = schema["properties"].pop("output")
         return schema
 
     def _build_tools_doc(self) -> str:
@@ -263,28 +266,40 @@ class FastClassifier:
 
     async def _run_tool(self, msg: InboundMessage, verdict: FastClassification) -> Decision:
         tc = verdict.tool_call
-        # Log the classifier's raw output + the tool call; the raw output is never delivered as-is.
+        # The model's own wording ("OK, gaszę w sypialni"). tool_call precedes output in the schema, so it
+        # is written after the arguments it describes.
+        confirmation = verdict.output.strip()
+        if not confirmation:
+            confirmation = random.choice(_CONFIRM_TEMPLATES).format(subject=self._tool_summary(tc))
+            logger.warning(f"⚡ tool {tc.name}: output empty on {msg.channel!r} — template confirmation")
         logger.info(
-            f"⚡ classified IMMEDIATE/tool [{msg.channel}] tool={tc.name} args={tc.arguments} output={verdict.output!r}"
+            f"⚡ classified IMMEDIATE/tool [{msg.channel}] tool={tc.name} args={tc.arguments} → {confirmation!r}"
         )
-        try:
-            ok, result = await self._mcp.call_checked(tc.name, tc.arguments)
-        except Exception as exc:
-            ok, result = False, f"exception: {exc}"
+        # Confirmation and tool call at once; a failed action is left to the main model to correct.
+        sent, called = await asyncio.gather(
+            self._channels.send_full_msg(msg.channel, confirmation),
+            self._mcp.call_checked(tc.name, tc.arguments),
+            return_exceptions=True,
+        )
+        ok, result = (False, f"exception: {called}") if isinstance(called, BaseException) else called
         if not ok:
-            # Fail-safe: the action did not succeed — hand the message to the main model with a note.
             logger.error(f"⚡ tool {tc.name} failed on {msg.channel!r}: {result}")
-            return Decision(handled=False, preamble=f"[FAST CLASSIFIER ERROR: tool {tc.name} failed: {result}]")
-
-        # Generic confirmation: tool name + ALL arguments (e.g. on/off), not the model's phrasing.
-        subject = self._tool_summary(tc)
-        confirmation = random.choice(_CONFIRM_TEMPLATES).format(subject=subject)
-        logger.info(f"⚡ tool {tc.name} ok → {result!r}; reply {confirmation!r}")
+            if msg.channel.startswith("signal/"):
+                try:
+                    await self._channels.send_chunk(msg.channel, "")  # typing indicator until the agent's reply
+                except Exception as exc:
+                    logger.warning(f"typing signal to {msg.channel!r} failed: {exc}")
+            told = "" if isinstance(sent, BaseException) else f" The user was already told: {confirmation!r}"
+            return Decision(handled=False, preamble=f"[FAST CLASSIFIER ERROR: tool {tc.name} failed: {result}.{told}]")
+        if isinstance(sent, BaseException):
+            logger.error(f"⚡ confirmation delivery failed on {msg.channel!r}: {sent}")
+            return Decision(handled=False, preamble=f"[FAST CLASSIFIER ERROR: confirmation delivery failed: {sent}]")
+        logger.info(f"⚡ tool {tc.name} ok → {result!r}")
         try:
-            await self._agent.record_immediate(msg, confirmation)
+            await self._agent.record_immediate(msg, confirmation, delivered=True)
         except Exception as exc:
-            logger.error(f"⚡ confirmation delivery failed on {msg.channel!r}: {exc}")
-            return Decision(handled=False, preamble=f"[FAST CLASSIFIER ERROR: confirmation delivery failed: {exc}]")
+            # Done and confirmed — handing it to the agent now would repeat the action.
+            logger.error(f"⚡ recording the tool turn failed on {msg.channel!r}: {exc}")
         return Decision(handled=True)
 
     @staticmethod
