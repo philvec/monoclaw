@@ -1,4 +1,5 @@
 import asyncio
+import http
 import json
 import time
 from collections.abc import Callable, Coroutine
@@ -38,19 +39,40 @@ class WebSocketChannelManager:
         "images": [{"mime": "image/jpeg", "data": "<base64>", "name": "photo.jpg"}]
         (an entry may also be an MP4 video: "mime": "video/mp4")
       - Server sends replies as two frames: {"chunk": "..."} then {"end": true}
+
+    Plain HTTP `GET /status` on the same port answers {"busy": bool}: a message is being
+    classified or answered, or a cron turn runs. modeswitch waits for false before swapping the LLM.
     """
 
     def __init__(self) -> None:
         self._connections: dict[str, Any] = {}
         self._on_message: Callable[[InboundMessage], Coroutine[Any, Any, None]]
+        self._agent_busy: Callable[[], bool]
+        self._in_flight = 0
 
     # Lifecycle
 
-    async def start(self, on_message: Callable[[InboundMessage], Coroutine[Any, Any, None]]) -> None:
+    async def start(self, on_message: Callable[[InboundMessage], Coroutine[Any, Any, None]],
+                    agent_busy: Callable[[], bool]) -> None:
         self._on_message = on_message
+        self._agent_busy = agent_busy
         logger.info(f"websocket server listening on {WS_HOST}:{WS_PORT}")
-        async with websockets.serve(self._handle, WS_HOST, WS_PORT, max_size=WS_MAX_FRAME_BYTES):
+        async with websockets.serve(self._handle, WS_HOST, WS_PORT, max_size=WS_MAX_FRAME_BYTES,
+                                    process_request=self._status):
             await asyncio.Future()
+
+    def _status(self, connection: Any, request: Any) -> Any:
+        if request.path != "/status":
+            return None                     # proceed with the WebSocket handshake
+        busy = self._in_flight > 0 or self._agent_busy()
+        return connection.respond(http.HTTPStatus.OK, json.dumps({"busy": busy}) + "\n")
+
+    async def _dispatch(self, msg: InboundMessage) -> None:
+        self._in_flight += 1
+        try:
+            await self._on_message(msg)
+        finally:
+            self._in_flight -= 1
 
     @property
     def active_channels(self) -> list[str]:
@@ -132,7 +154,7 @@ class WebSocketChannelManager:
                 # never log msg.images — base64 payloads would flood the log
                 img_note = f" +{len(msg.images)} image(s)" if msg.images else ""
                 logger.info(f"📨 message from {name!r}: {text[:60]!r}{img_note}")
-                asyncio.create_task(self._on_message(msg))
+                asyncio.create_task(self._dispatch(msg))
         finally:
             self._connections.pop(name, None)
             logger.info(f"🔌 channel disconnected: {name!r}")

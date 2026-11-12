@@ -441,6 +441,11 @@ class AgentLoop:
             self._histories[channel] = self._restore_checkpoint(channel)
         return self._histories[channel]
 
+    @property
+    def busy(self) -> bool:
+        """A foreground turn (message or cron) is queued or running."""
+        return not self._foreground_idle.is_set()
+
     # Public entry points
 
     async def handle_message(self, msg: InboundMessage, preamble: str | None = None) -> None:

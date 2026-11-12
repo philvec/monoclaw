@@ -128,7 +128,7 @@ async def main() -> None:
         asyncio.create_task(_resume(), name="mcp-resume")
 
     logger.info("monoclaw starting")
-    await channel_manager.start(on_message)
+    await channel_manager.start(on_message, agent_busy=lambda: agent.busy)
 
 
 async def _cleanup(cron: CronService, mcp: MCPClient) -> None:
