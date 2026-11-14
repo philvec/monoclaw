@@ -390,7 +390,7 @@ class AgentLoop:
         self._reviewer = Reviewer(llm)
         llm.set_schema_tools(tool_registry.definitions)
         # Histories are per channel, but turns stay serialized across all of them: there is one LLM
-        # slot, and tool_registry.current_channel is a single field.
+        # slot, and interleaved turns would evict each other's prompt cache.
         self._lock = asyncio.Lock()
         self._histories: dict[str, list[ChatCompletionMessageParam]] = {}
         self._latest: dict[str, InboundMessage] = {}  # per channel — see previous_replies()
@@ -504,11 +504,7 @@ class AgentLoop:
 
     async def _process(self, msg: InboundMessage, preamble: str | None = None) -> None:
         """Run one full agent turn: LLM call, tool loop, checkpoint, memory extraction."""
-        self._tool_registry.current_channel = msg.channel
-        try:
-            await self._process_inner(msg, preamble)
-        finally:
-            self._tool_registry.current_channel = None
+        await self._process_inner(msg, preamble)
 
     async def _process_inner(self, msg: InboundMessage, preamble: str | None = None) -> None:
         # Assemble turn messages, starting with the system prompt
@@ -700,7 +696,7 @@ class AgentLoop:
                             "one with image_search and download_image."
                         )
                     else:
-                        result = await self._tool_registry.execute(tc.name, tc.arguments)
+                        result = await self._tool_registry.execute(tc.name, tc.arguments, msg.channel)
                         if tc.name == "send_message" and result == f"sent to {tc.arguments.get('channel')}":
                             self._record_sent(tc.arguments["channel"], tc.arguments["text"])
                     if _IMAGE_MARKER.match(marker := result.split("\n", 1)[0]):

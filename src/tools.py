@@ -93,7 +93,6 @@ class ToolRegistry:
         self._mcp_client: Any = None
         self._mcp_schemas: list[dict] = []
         self._mcp_names: set[str] = set()
-        self.current_channel: str | None = None
         self._last_file: str | None = None
 
     @classmethod
@@ -179,11 +178,12 @@ class ToolRegistry:
         native = [_hide_edit_source(t.to_schema()) for t in self._tools.values()]
         return native + [_hide_edit_source(s) for s in self._mcp_schemas]
 
-    async def execute(self, name: str, arguments: dict) -> str:
-        if name == "send_message" and self.current_channel is not None:
-            if arguments.get("channel") == self.current_channel:
+    async def execute(self, name: str, arguments: dict, channel: str | None = None) -> str:
+        """channel: the one this turn replies to."""
+        if name == "send_message" and channel is not None:
+            if arguments.get("channel") == channel:
                 return (
-                    f"error: {self.current_channel!r} is the channel you are already replying to. Your reply "
+                    f"error: {channel!r} is the channel you are already replying to. Your reply "
                     "reaches it through the `message` field of your answer, which is delivered automatically "
                     "— you do not need a tool for it. send_message only reaches a DIFFERENT channel."
                 )
@@ -216,7 +216,7 @@ class ToolRegistry:
                 return str(result)
         if self._mcp_client is not None and name in self._mcp_names:
             ok, text = await self._mcp_client.call_checked(name, arguments)
-            note_mcp_result(ok, text, self.current_channel)  # may restart the process
+            note_mcp_result(ok, text, channel)  # may restart the process
             return text
         return f"unknown tool: {name!r}"
 
