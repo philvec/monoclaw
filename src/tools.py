@@ -7,7 +7,6 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar
 
-import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from channels import WebSocketChannelManager
@@ -110,7 +109,6 @@ class ToolRegistry:
         tools: list[Tool[Any]] = [
             ReadFileTool(cfg),
             ReadImageFileTool(cfg),
-            DownloadImageTool(cfg),
             WriteFileTool(cfg),
             EditFileTool(cfg),
             GlobTool(cfg),
@@ -285,44 +283,6 @@ class ReadImageFileTool(Tool["ReadImageFileTool.Params"]):
         # Marker must lead — agent._expand_markers only treats leading lines as image markers, and
         # strips them before the model sees the text.
         return f"[IMAGE {fname} {mime}]\n(showing {params.path})"
-
-
-class DownloadImageTool(Tool["DownloadImageTool.Params"]):
-    """Download a picture from an http(s) URL and look at it."""
-
-    _MAX_BYTES = 8_000_000
-
-    class Params(BaseModel):
-        url: str = Field(description="Direct URL of an image file (jpg, png, webp, gif, bmp)")
-
-    async def execute(self, params: Params) -> str:  # type: ignore[override]
-        if not params.url.lower().startswith(("http://", "https://")):
-            # Observed: the model reaches here with file:///workspace/x.png or a localhost URL when it
-            # wants to show a file it just made. Name the right tool instead of just refusing.
-            return (
-                f"error: not an http(s) url: {params.url!r}. Use read_image_file for a workspace file."
-            )
-        async with httpx.AsyncClient(follow_redirects=True, max_redirects=5) as client:
-            resp = await client.get(params.url, timeout=20.0, headers={"User-Agent": "monoclaw/1.0"})
-            resp.raise_for_status()
-            mime = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-            if mime not in ReadImageFileTool._MIMES:
-                return f"error: {params.url} is {mime or 'unknown type'}, not a supported image"
-            if len(resp.content) > self._MAX_BYTES:
-                return f"error: image is {len(resp.content) / 1e6:.1f} MB (limit {self._MAX_BYTES / 1e6:.0f} MB)"
-            data = resp.content
-        try:
-            data, mime = to_decodable_image(data, mime)  # e.g. webp → png; never store undecodable
-        except Exception as exc:
-            return f"error: could not decode {params.url} ({type(exc).__name__}) — try another URL"
-        IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
-        fname = f"{stamp}-fetched{IMAGE_MIME_EXT.get(mime) or '.img'}"
-        (IMAGES_DIR / fname).write_bytes(data)
-        logger.info(f"🖼️ download_image: {params.url} → {fname} ({len(data) / 1e3:.0f} kB)")
-        # Marker must lead — agent._expand_markers only treats leading lines as image markers, and
-        # strips them before the model sees the text.
-        return f"[IMAGE {fname} {mime}]\n(fetched from {params.url})"
 
 
 class WriteFileTool(Tool["WriteFileTool.Params"]):
