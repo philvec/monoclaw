@@ -21,6 +21,7 @@ from config import (
     IMAGE_HISTORY_TURNS,
     IMAGE_MIME_EXT,
     MEMORY_ENABLED,
+    REVIEWER_ENABLED,
     IMAGES_DIR,
     LLM_IMAGE_MIMES,
     OUTBOUND_IMAGES_MAX_TOTAL_BYTES,
@@ -286,21 +287,27 @@ _SCHEMA_INSTRUCTIONS = (
     "- Every picture you draw, change or fetch is sent to the user as you make it.\n"
     "- For any admission of inability (e.g. 'I don't have that data', 'I found nothing'): cite the tool "
     "you ran and what it returned, AND the rule that directs you to inform the user of this. "
-    "Vague justifications ('seemed appropriate', 'no relevant info') will fail review.\n"
-    "- message: the exact text delivered to the user. Write ONLY the direct answer — no preamble, "
+    + (
+        "Vague justifications ('seemed appropriate', 'no relevant info') will fail review.\n"
+        if REVIEWER_ENABLED else "\n"
+    )
+    + "- message: the exact text delivered to the user. Write ONLY the direct answer — no preamble, "
     "no follow-up offers ('Is there anything else?'), no unsolicited suggestions. "
     "Unless the user explicitly asked for those, leave them out. Narration of what you are doing does not "
     "belong here — it goes in the one-line comment before each tool call. "
     "message reports what you ACTUALLY DID and found; it must never announce or promise work "
     "('Szukam w sieci…', 'zaraz sprawdzę', 'a potem napiszę skrypt'). If an action is still needed, call the "
     "tool FIRST and answer with its result — a message that narrates an action you did not perform this turn "
-    "is a fabrication and will be rejected. "
-    "message MUST NEVER be empty. Every turn gets an answer — there is no way to stay silent. If you could "
+    + ("is a fabrication and will be rejected. " if REVIEWER_ENABLED else "is a fabrication. ")
+    + "message MUST NEVER be empty. Every turn gets an answer — there is no way to stay silent. If you could "
     "not do or find what was asked, say exactly that; if you have only a partial result, deliver it. An "
     "empty message is always a bug, never a choice.\n"
-    "Every response is reviewed. The reviewer verifies that every claim in the message is traceable to a "
-    "specific cited source in the justification.\n"
-    "TOOL POLICY: For questions about specific named entities (people, places, organisations, events), "
+    + (
+        "Every response is reviewed. The reviewer verifies that every claim in the message is traceable to a "
+        "specific cited source in the justification.\n"
+        if REVIEWER_ENABLED else ""
+    )
+    + "TOOL POLICY: For questions about specific named entities (people, places, organisations, events), "
     "current facts (prices, schedules, availability, rankings), or any knowledge not already in this "
     + ("conversation — if memory_search finds nothing relevant, " if MEMORY_ENABLED else "conversation — ")
     + "call web_search before answering. "
@@ -308,9 +315,12 @@ _SCHEMA_INSTRUCTIONS = (
     "ACTION RULE: Any action that requires a tool (editing a file, writing a file, running a command) "
     "MUST be executed via a tool call BEFORE your final Answer. "
     "Never state in your message that you edited, modified, updated, or wrote a file unless "
-    "an edit_file or write_file tool result already exists in this turn's conversation. "
-    "If the reviewer rejects your Answer for a missing tool call, your very next response "
-    "MUST call that tool — simply rewording the claim without calling the tool will be rejected again."
+    "an edit_file or write_file tool result already exists in this turn's conversation."
+    + (
+        " If the reviewer rejects your Answer for a missing tool call, your very next response "
+        "MUST call that tool — simply rewording the claim without calling the tool will be rejected again."
+        if REVIEWER_ENABLED else ""
+    )
 )
 
 _CLASSIFIER_INSTRUCTIONS = (
@@ -793,6 +803,8 @@ class AgentLoop:
                         + (" Your answer was cut off at the output token limit before message." if truncated else "")
                     ],
                 )
+            elif not REVIEWER_ENABLED:
+                review = Review(is_correct=True, to_be_fixed=[])  # no second pass: the answer goes out as is
             else:
                 # The reviewer sees the pictures too. Denied the evidence it does not abstain — it
                 # falls back on "the claimed tool call is missing" and rejects correct descriptions.
@@ -814,7 +826,8 @@ class AgentLoop:
             if review.is_correct:
                 review_accepted = True
                 just_preview = initial_answer.justification[:200] + ("…" if len(initial_answer.justification) > 200 else "")
-                logger.info(f"✅ review passed (attempt {review_rejections + 1}) justification={just_preview!r}")
+                verdict = f"review passed (attempt {review_rejections + 1})" if REVIEWER_ENABLED else "reviewer off"
+                logger.info(f"✅ {verdict} justification={just_preview!r}")
                 # An empty message is rejected before review, so an accepted answer always delivers.
                 preview = initial_answer.message[:120] + ("…" if len(initial_answer.message) > 120 else "")
                 logger.info(f"📤 delivering to {msg.channel!r}: {preview!r}")
@@ -1033,6 +1046,8 @@ class AgentLoop:
 
     async def _warm_reviewer_cache(self, channel: str) -> None:
         """Prefill the reviewer KV cache with the channel's history prefix."""
+        if not REVIEWER_ENABLED:
+            return  # no reviewer, nothing to warm: these were 15-20k-token prefills on the shared slot
         try:
             if not self._foreground_idle.is_set():
                 logger.info("⏳ reviewer cache warm-up: waiting for foreground idle")

@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -92,6 +93,11 @@ def sniff_image_mime(head: bytes) -> str:
 # Every prompt that names a memory tool is conditional on this flag: leaving the instructions in
 # while the tools are gone would just teach the model to call something that is not there.
 MEMORY_ENABLED = True
+
+# The second-pass reviewer of every answer (reviewer.py). REVIEWER_ENABLED=false (env) sends answers out
+# without it: one model call less per answer and no reviewer cache warm-ups. Prompts that mention the
+# review are conditional on it; the "message must not be empty" check is not the reviewer and stays.
+REVIEWER_ENABLED = os.environ.get("REVIEWER_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
 
 IMAGE_HISTORY_TURNS = 1  # newest USER marker messages shown as pictures; older lose their marker line
 WS_MAX_FRAME_BYTES = 16 * 1024 * 1024  # base64 images exceed the websockets default (1 MB)
