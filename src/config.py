@@ -99,6 +99,17 @@ MEMORY_ENABLED = True
 # review are conditional on it; the "message must not be empty" check is not the reviewer and stays.
 REVIEWER_ENABLED = os.environ.get("REVIEWER_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
 
+# The answer as a second, structured call {justification, message} after the last tool-less response.
+# FINAL_ANSWER_JUSTIFICATION=false (env) skips it: that response's own text is the reply, one call less.
+# Defaults to REVIEWER_ENABLED; the reviewer judges the justification, so it cannot run without one.
+FINAL_ANSWER_JUSTIFICATION = os.environ.get(
+    "FINAL_ANSWER_JUSTIFICATION", str(REVIEWER_ENABLED)
+).strip().lower() not in ("0", "false", "no", "off")
+if REVIEWER_ENABLED and not FINAL_ANSWER_JUSTIFICATION:
+    raise ValueError(
+        "FINAL_ANSWER_JUSTIFICATION=false needs REVIEWER_ENABLED=false: the reviewer judges the justification"
+    )
+
 IMAGE_HISTORY_TURNS = 1  # newest USER marker messages shown as pictures; older lose their marker line
 WS_MAX_FRAME_BYTES = 16 * 1024 * 1024  # base64 images exceed the websockets default (1 MB)
 # Raw bytes of ONE outbound picture — each travels in its own message. base64 inflates by 4/3, and a

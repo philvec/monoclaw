@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from config import logger, MEMORY_ENABLED, ToolsConfig
+from config import logger, FINAL_ANSWER_JUSTIFICATION, MEMORY_ENABLED, ToolsConfig
 from llm import LLMClient
 from memory_store import MemoryStore, MemoryEntry
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionUserMessageParam
@@ -25,7 +25,9 @@ Tool use — BIAS TOWARD ACTION:
 When in doubt, use a tool rather than guess or claim inability. Specifically:
 - Need a fact, current data, or real-time info → use web search or web fetch before saying you lack access.
 - Asked about past context, preferences, or prior decisions → if the answer is stated in the system \
-prompt (e.g. a MASTER.md rule), cite it directly as a source in your justification.
+prompt (e.g. a MASTER.md rule), """ + (
+    "cite it directly as a source in your justification." if FINAL_ANSWER_JUSTIFICATION else "use it directly."
+) + """
 - Asked to do something (send, create, schedule, control, fetch) → attempt the tool; only report failure \
 if the tool actually fails.
 Never fabricate a tool result. Never say "I searched" or "I checked" unless you called the tool this turn.

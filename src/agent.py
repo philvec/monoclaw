@@ -22,6 +22,7 @@ from config import (
     IMAGE_MIME_EXT,
     MEMORY_ENABLED,
     REVIEWER_ENABLED,
+    FINAL_ANSWER_JUSTIFICATION,
     IMAGES_DIR,
     LLM_IMAGE_MIMES,
     OUTBOUND_IMAGES_MAX_TOTAL_BYTES,
@@ -276,22 +277,33 @@ def _with_images(
 
 
 _SCHEMA_INSTRUCTIONS = (
-    "RESPONSE SCHEMA RULES:\n"
-    "- justification: internal reasoning only, never shown to the user. "
-    "Must explicitly justify every factual claim put in the message. "
-    "For each claim, cite the exact source: system prompt / MASTER.md rule (e.g. 'system prompt states X'), "
-    "named tool result (e.g. 'web_search returned empty'), "
-    + ("named memory entry (e.g. 'memory user-prefers-polish'), " if MEMORY_ENABLED else "")
-    + "quoted past message, exact channel rule, "
-    "or a picture or video you can see (cite as 'the picture shows X' / 'the video shows X').\n"
-    "- Every picture you draw, change or fetch is sent to the user as you make it.\n"
-    "- For any admission of inability (e.g. 'I don't have that data', 'I found nothing'): cite the tool "
-    "you ran and what it returned, AND the rule that directs you to inform the user of this. "
-    + (
-        "Vague justifications ('seemed appropriate', 'no relevant info') will fail review.\n"
-        if REVIEWER_ENABLED else "\n"
+    (
+        "RESPONSE SCHEMA RULES:\n"
+        "- justification: internal reasoning only, never shown to the user. "
+        "Must explicitly justify every factual claim put in the message. "
+        "For each claim, cite the exact source: system prompt / MASTER.md rule (e.g. 'system prompt states X'), "
+        "named tool result (e.g. 'web_search returned empty'), "
+        + ("named memory entry (e.g. 'memory user-prefers-polish'), " if MEMORY_ENABLED else "")
+        + "quoted past message, exact channel rule, "
+        "or a picture or video you can see (cite as 'the picture shows X' / 'the video shows X').\n"
+        if FINAL_ANSWER_JUSTIFICATION else "RESPONSE RULES:\n"
     )
-    + "- message: the exact text delivered to the user. Write ONLY the direct answer — no preamble, "
+    + "- Every picture you draw, change or fetch is sent to the user as you make it.\n"
+    + (
+        "- For any admission of inability (e.g. 'I don't have that data', 'I found nothing'): cite the tool "
+        "you ran and what it returned, AND the rule that directs you to inform the user of this. "
+        + (
+            "Vague justifications ('seemed appropriate', 'no relevant info') will fail review.\n"
+            if REVIEWER_ENABLED else "\n"
+        )
+        if FINAL_ANSWER_JUSTIFICATION else ""
+    )
+    + (
+        "- message: the exact text delivered to the user. " if FINAL_ANSWER_JUSTIFICATION
+        else "- message: your final response — the text you write without calling a tool — delivered to the "
+        "user verbatim. "
+    )
+    + "Write ONLY the direct answer — no preamble, "
     "no follow-up offers ('Is there anything else?'), no unsolicited suggestions. "
     "Unless the user explicitly asked for those, leave them out. Narration of what you are doing does not "
     "belong here — it goes in the one-line comment before each tool call. "
@@ -731,34 +743,39 @@ class AgentLoop:
                     )
                 break
 
-            struct_msgs: list[ChatCompletionMessageParam] = list(messages)
-            if response.content:
-                struct_msgs.append(ChatCompletionAssistantMessageParam(role="assistant", content=response.content))
-            struct_msgs.append(
-                ChatCompletionUserMessageParam(
-                    role="user",
-                    content=(
-                        f"The request you must answer NOW is: {_request_preview(msg.text)}\n"
-                        "The conversation above is context; its earlier requests are already answered.\n"
-                        "Produce your Answer as a JSON object: justification (str), message (str). "
-                        "message must never be empty — every turn gets an answer. "
-                        "IMPORTANT: if this task required a file edit or other tool action that has NOT yet been "
-                        "performed in this turn, do NOT claim it in message — call the tool first."
-                        # Without this the model writes "I cannot send pictures" in the same turn the
-                        # user is already looking at one it made.
-                        + (
-                            f" The {len(reel)} picture(s) you made this turn have already been sent — write "
-                            "the message as if the user is looking at them."
-                            if reel
-                            else ""
-                        )
-                    ),
+            if FINAL_ANSWER_JUSTIFICATION:
+                struct_msgs: list[ChatCompletionMessageParam] = list(messages)
+                if response.content:
+                    struct_msgs.append(ChatCompletionAssistantMessageParam(role="assistant", content=response.content))
+                struct_msgs.append(
+                    ChatCompletionUserMessageParam(
+                        role="user",
+                        content=(
+                            f"The request you must answer NOW is: {_request_preview(msg.text)}\n"
+                            "The conversation above is context; its earlier requests are already answered.\n"
+                            "Produce your Answer as a JSON object: justification (str), message (str). "
+                            "message must never be empty — every turn gets an answer. "
+                            "IMPORTANT: if this task required a file edit or other tool action that has NOT yet been "
+                            "performed in this turn, do NOT claim it in message — call the tool first."
+                            # Without this the model writes "I cannot send pictures" in the same turn the
+                            # user is already looking at one it made.
+                            + (
+                                f" The {len(reel)} picture(s) you made this turn have already been sent — write "
+                                "the message as if the user is looking at them."
+                                if reel
+                                else ""
+                            )
+                        ),
+                    )
                 )
-            )
-            struct_resp = await self._llm.chat(
-                _with_images(struct_msgs, reel), response_model=Answer, enable_thinking=_ANSWER_THINKING
-            )
-            initial_answer: Answer | None = struct_resp.parsed if isinstance(struct_resp.parsed, Answer) else None
+                struct_resp = await self._llm.chat(
+                    _with_images(struct_msgs, reel), response_model=Answer, enable_thinking=_ANSWER_THINKING
+                )
+                initial_answer: Answer | None = struct_resp.parsed if isinstance(struct_resp.parsed, Answer) else None
+            else:
+                # No second call: the text of this tool-less response is the reply.
+                struct_resp = response
+                initial_answer = Answer(justification="", message=response.content or "")
             if initial_answer is not None:
                 raw_preview = initial_answer.message[:200] + ("…" if len(initial_answer.message) > 200 else "")
                 logger.info(f"🗒️ agent answer (pre-review): msg={raw_preview!r}")
@@ -852,8 +869,10 @@ class AgentLoop:
                 )
             reviewer_content += (
                 "\nRetry. " + tool_clause + "Address exactly what the rejection listed; do not redo work that "
-                "already succeeded. Both fields required: justification (str), message (str), and message MUST be "
-                "non-empty — the user is waiting for a response. Fix the specific problem and answer."
+                "already succeeded. "
+                + ("Both fields required: justification (str), message (str), and message MUST be "
+                   if FINAL_ANSWER_JUSTIFICATION else "Your reply MUST be ")
+                + "non-empty — the user is waiting for a response. Fix the specific problem and answer."
             )
             logger.info(f"❌ review rejected (attempt {review_rejections}/{MAX_NEGATIVE_REVIEWS}): {review.to_be_fixed}")
             messages.append(ChatCompletionUserMessageParam(role="user", content=reviewer_content))
