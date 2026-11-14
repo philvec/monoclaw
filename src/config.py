@@ -173,6 +173,9 @@ class Config(BaseSettings):
     classifier: ClassifierConfig = ClassifierConfig()
     mcp: list[MCPServerConfig] = []
     monoclaw_tools_url: str = ""  # shorthand: auto-registers monoclaw-tools sidecar when set
+    # a Python file of deployment tools loaded in-process (no MCP hop): its tools(cfg) returns Tool
+    # instances, its optional start() runs once the event loop is up (see ToolRegistry.load_extra)
+    monoclaw_extra_tools: str = ""
 
     model_config = SettingsConfigDict(
         env_nested_delimiter="__",

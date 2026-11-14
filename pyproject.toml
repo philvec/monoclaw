@@ -14,6 +14,9 @@ dependencies = [
     "numpy>=1.26",
     "pillow>=11.0",
     "mcp>=1.0.0",
+    # used by a deployment's in-process extra tools (home-ai nimbus-tools: web_fetch, email)
+    "markdownify==1.2.2",
+    "tqdm",
 ]
 
 [dependency-groups]

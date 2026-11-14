@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import signal as _signal
 import sys
 import time
@@ -45,6 +46,11 @@ async def main() -> None:
     cron = CronService()
     channel_manager = WebSocketChannelManager()
     tool_registry = ToolRegistry.from_config(cfg, cron, channel_manager, store, llm)
+    if cfg.monoclaw_extra_tools:
+        extra = tool_registry.load_extra(cfg.monoclaw_extra_tools, cfg)
+        if hasattr(extra, "start"):
+            if inspect.isawaitable(started := extra.start()):
+                await started
 
     mcp = MCPClient(cfg.mcp)
     await mcp.start()
@@ -71,7 +77,8 @@ async def main() -> None:
     # Pre-agent input classification layer: sits right after the WebSocket
     # (channels.py) and before the Monoclaw agent. Decides per message whether to
     # answer immediately (fast path) or pass through to the full agent.
-    fast_classifier = FastClassifier(cfg.classifier, agent, mcp, channel_manager)
+    # the registry: native tools (extra tools included) and MCP behind the same schemas_for/call_checked
+    fast_classifier = FastClassifier(cfg.classifier, agent, tool_registry, channel_manager)
     fast_classifier.log_startup()
     agent.attach_abstention_line(fast_classifier.abstention_line)  # same small model words the abstention
 

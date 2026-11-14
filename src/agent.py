@@ -303,7 +303,7 @@ _SCHEMA_INSTRUCTIONS = (
     "TOOL POLICY: For questions about specific named entities (people, places, organisations, events), "
     "current facts (prices, schedules, availability, rankings), or any knowledge not already in this "
     + ("conversation — if memory_search finds nothing relevant, " if MEMORY_ENABLED else "conversation — ")
-    + "call tools__web_search before answering. "
+    + "call web_search before answering. "
     "Never rely on training knowledge alone for such facts; it may be stale or wrong.\n"
     "ACTION RULE: Any action that requires a tool (editing a file, writing a file, running a command) "
     "MUST be executed via a tool call BEFORE your final Answer. "

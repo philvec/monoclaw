@@ -75,7 +75,7 @@ what to improve.
 ## 5. External facts need a web search
 If the message states a fact about a specific named entity (person, place, organisation, event), \
 current data (price, schedule, ranking, availability), or any time-sensitive claim that is NOT present \
-in the system prompt{_MEM_BACKED}, verify that `tools__web_search` appears in \
+in the system prompt{_MEM_BACKED}, verify that `web_search` appears in \
 `[ACTUALLY MADE TOOL CALLS THIS ROUND]`. If the agent relied solely on training knowledge for such a \
 claim, mark `is_correct=False`.
 

@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import json
 import mimetypes
 import re
@@ -65,7 +66,7 @@ class Tool(ABC, Generic[P]):
         }
 
 
-EDIT_IMAGE_TOOL = "edit_image"  # bare MCP name; the server prefix ("tools__") is configurable
+EDIT_IMAGE_TOOL = "edit_image"  # bare name: a native tool's, or an MCP one's after its "<server>__" prefix
 
 
 def _hide_edit_source(schema: dict) -> dict:
@@ -129,6 +130,41 @@ class ToolRegistry:
             registry.register(tool)
         return registry
 
+    def load_extra(self, path: str, cfg: Config) -> Any:
+        """Register the tools of a deployment's tool file (MONOCLAW_EXTRA_TOOLS): in-process, so a call
+        costs no MCP round trip. Returns the module, whose optional start() the caller runs."""
+        spec = importlib.util.spec_from_file_location("monoclaw_extra_tools", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load extra tools from {path!r}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for tool in module.tools(cfg):
+            if tool.name in self._tools:
+                raise ValueError(f"extra tool {tool.name!r} collides with a built-in tool")
+            self.register(tool)
+        return module
+
+    def schemas_for(self, bare_names: list[str]) -> list[dict]:
+        """Schemas of the named tools, native first, then MCP (bare names, as MCPClient.schemas_for):
+        scopes tools to the fast classifier."""
+        native = [_hide_edit_source(t.to_schema()) for n, t in self._tools.items() if n in bare_names]
+        return native + (self._mcp_client.schemas_for(bare_names) if self._mcp_client is not None else [])
+
+    async def call_checked(self, name: str, arguments: dict) -> tuple[bool, str]:
+        """(ok, text) like MCPClient.call_checked, for native tools too: ok is False when the tool raised
+        (the fast classifier then hands the message to the full agent)."""
+        if name in self._tools:
+            tool = self._tools[name]
+            try:
+                result = await tool.execute(tool.Params.model_validate(arguments))
+            except Exception as exc:
+                logger.exception(f"tool {name!r} raised")
+                return False, f"error: {exc}"
+            return True, result if isinstance(result, str) else json.dumps(result)
+        if self._mcp_client is not None:
+            return await self._mcp_client.call_checked(name, arguments)
+        return False, f"unknown tool: {name!r}"
+
     def attach_mcp(self, client: Any) -> None:
         self._mcp_client = client
         self._mcp_schemas = client.tool_schemas
@@ -142,7 +178,8 @@ class ToolRegistry:
 
     @property
     def definitions(self) -> list[dict]:
-        return [t.to_schema() for t in self._tools.values()] + [_hide_edit_source(s) for s in self._mcp_schemas]
+        native = [_hide_edit_source(t.to_schema()) for t in self._tools.values()]
+        return native + [_hide_edit_source(s) for s in self._mcp_schemas]
 
     async def execute(self, name: str, arguments: dict) -> str:
         if name == "send_message" and self.current_channel is not None:
