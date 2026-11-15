@@ -61,6 +61,8 @@ When the agent is about to reply (it may still need to run tools before generati
 {"chunk": ""}
 ```
 
+A picture or sound a tool makes goes out the moment it is made, as its own message with an empty chunk carrying `"images": [{"mime": ..., "data": "<base64>", "name": ...}]` — despite the field name, any attachment (`audio/wav` too); clients render what they support. A tool returns a sound as a first result line `[AUDIO <file in data/images> <audio/mime>]`; unlike a picture it is never put in the model's input.
+
 A progress line (narration before a tool call) ends with `{"end": true, "interim": true}` instead, so a client can tell it from the answer. Each step's tool calls follow it (or come alone, when the step has no progress line) as `{"tools": [{"name": "fdb_query", "arguments": {...}}]}`, sent before they run. Once a message has had all its replies, a `done` frame follows (bridges that only deliver messages can ignore it):
 ```json
 {"done": true}

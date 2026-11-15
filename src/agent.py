@@ -57,6 +57,8 @@ _HISTORY_DIR = Path("./data/history")  # one <quoted channel>.jsonl per channel,
 IMAGE_MARKER_PREFIX = "[IMAGE "
 # Videos ride the same marker with a video/* mime: same storage, same expansion window, same stripping.
 _IMAGE_MARKER = re.compile(r"^\[IMAGE ([^\s\]]+) ((?:image|video)/[^\s\]]+)\]$")
+# A tool's sound, stored in IMAGES_DIR like its pictures: sent to the user, never put in the model's input
+_AUDIO_MARKER = re.compile(r"^\[AUDIO ([^\s\]]+) (audio/[^\s\]]+)\]$")
 MAX_REEL_IMAGES = 4  # pictures kept visible in the prompt; each was already sent when it was made
 # Answer already HAS a reasoning field — `justification` — so a think block reasons twice and throws
 # the expensive copy away. Worse, reasoning is billed against max_tokens but arrives in a separate
@@ -788,6 +790,8 @@ class AgentLoop:
                                 await self._channel_manager.send_full_msg(msg.channel, "", _load_attachments([marker]))
                             except Exception as exc:
                                 logger.warning(f"picture delivery to {msg.channel!r} skipped: {exc}")
+                    elif am := _AUDIO_MARKER.match(result.split("\n", 1)[0]):
+                        result = await self._deliver_sound(msg.channel, am, result.partition("\n")[2])
                     messages.append(ChatCompletionToolMessageParam(role="tool", tool_call_id=tc.id, content=result))
                 continue
 
@@ -1028,6 +1032,24 @@ class AgentLoop:
             else:
                 self._extract_cancel_count[ch] = 0
                 self._pending_extract[ch] = asyncio.create_task(self._run_extract_memories(ch), name="extract")
+
+    async def _deliver_sound(self, channel: str, marker: re.Match, rest: str) -> str:
+        """A tool's sound goes to the user the moment it is made, like a picture: an attachment the client
+        renders if it can (signal-bridge attaches the file, a voice front end plays it). The model cannot
+        hear it and a filename is transport, so the tool result it reads says only whether it was sent."""
+        path = IMAGES_DIR / Path(marker.group(1)).name   # basename only, as for pictures
+        sent = False
+        if channel != CRON_CHANNEL and path.is_file() and path.stat().st_size <= OUTBOUND_IMAGES_MAX_TOTAL_BYTES:
+            attachment = {"mime": marker.group(2), "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+                          "name": path.name}
+            logger.info(f"🔊 delivering sound to {channel!r}: {path.name}")
+            try:
+                await self._channel_manager.send_full_msg(channel, "", [attachment])
+                sent = True
+            except Exception as exc:
+                logger.warning(f"sound delivery to {channel!r} skipped: {exc}")
+        note = "(the sound was sent to the user)" if sent else "(this sound could not be sent to the user)"
+        return f"{rest.strip()}\n{note}".strip()
 
     def _record_sent(self, channel: str, text: str) -> None:
         """A send_message delivery belongs to the target channel's conversation: without it, a reply

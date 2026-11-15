@@ -1,8 +1,10 @@
 # monoclaw agent container
 FROM python:3.12-slim
 
+# a deployment's extra system packages for its own tools (e.g. "fluidsynth fluid-soundfont-gm")
+ARG EXTRA_APT_PACKAGES=""
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash curl wget git ripgrep jq ca-certificates \
+    bash curl wget git ripgrep jq ca-certificates $EXTRA_APT_PACKAGES \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install uv --no-cache-dir
