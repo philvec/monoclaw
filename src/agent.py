@@ -403,6 +403,7 @@ class AgentLoop:
         # Histories are per channel, but turns stay serialized across all of them: there is one LLM
         # slot, and interleaved turns would evict each other's prompt cache.
         self._lock = asyncio.Lock()
+        self.extra_system_prompt = ""  # the extra tools' system_prompt() (main.py), appended to the system prompt
         self._histories: dict[str, list[ChatCompletionMessageParam]] = {}
         self._latest: dict[str, InboundMessage] = {}  # per channel — see previous_replies()
         self._foreground_count = 0
@@ -424,6 +425,7 @@ class AgentLoop:
             + _SCHEMA_INSTRUCTIONS
             + "\n\n"
             + _CLASSIFIER_INSTRUCTIONS
+            + (f"\n\n{self.extra_system_prompt}" if self.extra_system_prompt else "")
         )
 
     async def startup(self) -> None:

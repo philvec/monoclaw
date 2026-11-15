@@ -191,7 +191,8 @@ class Config(BaseSettings):
     mcp: list[MCPServerConfig] = []
     monoclaw_tools_url: str = ""  # shorthand: auto-registers monoclaw-tools sidecar when set
     # a Python file of deployment tools loaded in-process (no MCP hop): its tools(cfg) returns Tool
-    # instances, its optional start() runs once the event loop is up (see ToolRegistry.load_extra)
+    # instances, its optional start() runs once the event loop is up (see ToolRegistry.load_extra), and
+    # its optional system_prompt() text is read once at startup and appended to the system prompt
     monoclaw_extra_tools: str = ""
 
     model_config = SettingsConfigDict(

@@ -46,17 +46,21 @@ async def main() -> None:
     cron = CronService()
     channel_manager = WebSocketChannelManager()
     tool_registry = ToolRegistry.from_config(cfg, cron, channel_manager, store, llm)
-    if cfg.monoclaw_extra_tools:
-        extra = tool_registry.load_extra(cfg.monoclaw_extra_tools, cfg)
-        if hasattr(extra, "start"):
-            if inspect.isawaitable(started := extra.start()):
-                await started
+    extra = tool_registry.load_extra(cfg.monoclaw_extra_tools, cfg) if cfg.monoclaw_extra_tools else None
+    if hasattr(extra, "start"):
+        if inspect.isawaitable(started := extra.start()):
+            await started
 
     mcp = MCPClient(cfg.mcp)
     await mcp.start()
     tool_registry.attach_mcp(mcp)
 
     agent = AgentLoop(llm, tool_registry, memory, ctx, channel_manager)
+    if hasattr(extra, "system_prompt"):
+        # read once, before the cache warm-up: fixed for the process, so it stays in the cached prefix
+        if inspect.isawaitable(text := extra.system_prompt()):
+            text = await text
+        agent.extra_system_prompt = text
     await agent.startup()
 
     # optional: scheduled memory consolidation
