@@ -39,12 +39,14 @@ class WebSocketChannelManager:
       - Client connects and sends a handshake with its name: {"name": "signal/bob"}, optionally with
         "classifier": false (no fast classifier: every message goes to the agent; default true) and
         "quick_session": true (a fresh conversation: no history loaded or saved, memory extracted once
-        when the connection closes; default false)
+        when the connection closes, and a turn still running then is cancelled; default false)
       - Client sends messages: {"text": "..."} with optional
         "images": [{"mime": "image/jpeg", "data": "<base64>", "name": "photo.jpg"}]
-        (an entry may also be an MP4 video: "mime": "video/mp4")
+        (an entry may also be an MP4 video: "mime": "video/mp4") and "interrupt": true (cancel the
+        channel's running and queued turns first)
       - Server sends replies as two frames: {"chunk": "..."} then {"end": true}; a message can get
-        several replies (progress lines, then the answer), and {"done": true} follows the last one
+        several replies (progress lines end with {"end": true, "interim": true}, then the answer), and
+        {"done": true} follows the last one
 
     Plain HTTP `GET /status` on the same port answers {"busy": bool}: a message is being
     classified or answered, or a cron turn runs. modeswitch waits for false before swapping the LLM.
@@ -53,6 +55,7 @@ class WebSocketChannelManager:
     def __init__(self) -> None:
         self._connections: dict[str, Any] = {}
         self._options: dict[str, dict[str, bool]] = {}  # per connected channel: the handshake's options
+        self._tasks: dict[str, set[asyncio.Task]] = {}  # per channel: its messages still being handled
         self._on_message: Callable[[InboundMessage], Coroutine[Any, Any, None]]
         self._agent_busy: Callable[[], bool]
         self._on_connect: Callable[[str, dict[str, bool]], None]
@@ -108,17 +111,18 @@ class WebSocketChannelManager:
             frame["images"] = images
         await ws.send(json.dumps(frame))
 
-    async def end_msg(self, channel_name: str) -> None:
-        """Signal end-of-message to a channel."""
+    async def end_msg(self, channel_name: str, interim: bool = False) -> None:
+        """Signal end-of-message to a channel; interim: a progress line, not the answer."""
         ws = self._connections.get(channel_name)
         if ws is None:
             raise RuntimeError(f"channel {channel_name!r} is not connected")
-        await ws.send(json.dumps({"end": True}))
+        await ws.send(json.dumps({"end": True, "interim": True} if interim else {"end": True}))
 
-    async def send_full_msg(self, channel_name: str, text: str, images: list[dict] | None = None) -> None:
+    async def send_full_msg(self, channel_name: str, text: str, images: list[dict] | None = None,
+                            interim: bool = False) -> None:
         """Atomic chunk + end convenience — single complete message."""
         await self.send_chunk(channel_name, text, images)
-        await self.end_msg(channel_name)
+        await self.end_msg(channel_name, interim)
 
     async def turn_done(self, channel_name: str) -> None:
         """Signal that a message has had all its replies (a client that ignores unknown frames, like
@@ -184,8 +188,22 @@ class WebSocketChannelManager:
                 # never log msg.images — base64 payloads would flood the log
                 img_note = f" +{len(msg.images)} image(s)" if msg.images else ""
                 logger.info(f"📨 message from {name!r}: {text[:60]!r}{img_note}")
-                asyncio.create_task(self._dispatch(msg))
+                if data.get("interrupt") is True:
+                    self._cancel(name, "interrupted by a newer message")
+                tasks = self._tasks.setdefault(name, set())
+                tasks.add(task := asyncio.create_task(self._dispatch(msg)))
+                task.add_done_callback(tasks.discard)
         finally:
             self._connections.pop(name, None)
             logger.info(f"🔌 channel disconnected: {name!r}")
-            self._on_disconnect(name, self._options.pop(name))
+            options = self._options.pop(name)
+            if options["quick_session"]:
+                self._cancel(name, "the quick session closed")  # nobody is left to answer
+            self._on_disconnect(name, options)
+
+    def _cancel(self, channel_name: str, why: str) -> None:
+        """Cancel the channel's messages still being handled: the running turn and any queued behind it."""
+        if tasks := [t for t in self._tasks.get(channel_name, ()) if not t.done()]:
+            logger.info(f"✋ cancelling {len(tasks)} turn(s) of {channel_name!r}: {why}")
+            for task in tasks:
+                task.cancel()

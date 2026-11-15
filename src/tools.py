@@ -418,6 +418,7 @@ class RunCommandTool(Tool["RunCommandTool.Params"]):
         if denial:
             return f"blocked: {denial}"
         timeout = min(params.timeout, self._cfg.tools.exec_timeout_max_s)
+        proc = None
         try:
             proc = await asyncio.create_subprocess_shell(
                 params.command,
@@ -431,6 +432,11 @@ class RunCommandTool(Tool["RunCommandTool.Params"]):
             exit_code, output = 124, "timed out"
         except Exception as exc:
             exit_code, output = 1, str(exc)
+        finally:
+            # a timeout or a cancelled turn must not leave the shell running (what it detached itself,
+            # e.g. with setsid or nohup &, is meant to outlive it and does)
+            if proc is not None and proc.returncode is None:
+                proc.kill()
         suffix = f"\n[exit {exit_code}]" if exit_code != 0 else ""
         return _truncate(output) + suffix
 

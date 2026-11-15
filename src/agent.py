@@ -515,9 +515,21 @@ class AgentLoop:
         logger.info(f"🔒 acquiring session lock for {msg.channel!r}")
         self._foreground_count += 1
         self._foreground_idle.clear()
+        started = False
         try:
             async with self._lock:
+                started = True
                 await self._process(msg, preamble)
+        except asyncio.CancelledError:
+            # channels.py cancels a turn on a newer message with "interrupt" or when a quick session
+            # closes. Its request is already in history; say it got no answer, so the next turn does
+            # not answer it now as well.
+            if started:
+                note = ChatCompletionUserMessageParam(
+                    role="user", content="[this request was interrupted before its answer and is dropped]")
+                self._history(msg.channel).append(note)
+                self._append_to_checkpoint(msg.channel, note)
+            raise
         finally:
             msg.answered = True
             self._foreground_count -= 1
@@ -682,7 +694,7 @@ class AgentLoop:
                         seen_interims.add(key)
                         logger.info(f"📤 delivering interim to {msg.channel!r}: {preview!r}")
                         try:
-                            await self._channel_manager.send_full_msg(msg.channel, interim)
+                            await self._channel_manager.send_full_msg(msg.channel, interim, interim=True)
                             msg.replies.append(interim)
                         except Exception as exc:
                             logger.warning(f"interim delivery to {msg.channel!r} skipped: {exc}")

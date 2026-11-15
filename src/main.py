@@ -91,7 +91,8 @@ async def main() -> None:
             await dispatch(msg)
         finally:
             try:
-                await channel_manager.turn_done(msg.channel)
+                # shielded: a turn cancelled ("interrupt") still owes its client exactly one done frame
+                await asyncio.shield(channel_manager.turn_done(msg.channel))
             except Exception as exc:
                 logger.warning(f"done signal to {msg.channel!r} skipped: {exc}")
 

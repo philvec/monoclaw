@@ -35,7 +35,7 @@ A bridge connects to monoclaw via WebSocket on port `8765`.
 {"name": "signal"}
 ```
 
-Two optional flags (shown with their defaults): `"classifier": true` — `false` sends every message straight to the agent, without the fast classifier (e.g. a voice front end that already answers the simple things itself); `"quick_session": false` — `true` makes the connection a fresh conversation: no history loaded or saved, no memory extraction per turn, and one extraction over the whole session once the connection closes (the session is then archived and dropped). Every connect warms the LLM cache for the channel's next turn.
+Two optional flags (shown with their defaults): `"classifier": true` — `false` sends every message straight to the agent, without the fast classifier (e.g. a voice front end that already answers the simple things itself); `"quick_session": false` — `true` makes the connection a fresh conversation: no history loaded or saved, no memory extraction per turn, and one extraction over the whole session once the connection closes (a turn still running then is cancelled; the session is then archived and dropped). Every connect warms the LLM cache for the channel's next turn.
 
 **Inbound message** (bridge → monoclaw):
 ```json
@@ -46,6 +46,8 @@ Optionally with images — the model is multimodal. `images` may be omitted enti
 ```json
 {"text": "co to jest?", "images": [{"mime": "image/jpeg", "data": "<base64>", "name": "photo.jpg"}]}
 ```
+
+`"interrupt": true` on a message cancels the channel's running turn (and any queued behind it) first — e.g. a voice front end passing on the user's correction; the cancelled request stays in history marked as unanswered.
 
 **Outbound message** (monoclaw → bridge) — a reply arrives as one or more `chunk` frames (streamed token-by-token during auto-delivery, or a single chunk for fan-out) terminated by an `end` frame. A single turn may produce multiple such messages (e.g. mid-turn narration before a tool call, then a final answer):
 ```json
@@ -59,7 +61,7 @@ When the agent is about to reply (it may still need to run tools before generati
 {"chunk": ""}
 ```
 
-Once a message has had all its replies, a `done` frame follows (bridges that only deliver messages can ignore it):
+A progress line (narration before a tool call) ends with `{"end": true, "interim": true}` instead, so a client can tell it from the answer. Once a message has had all its replies, a `done` frame follows (bridges that only deliver messages can ignore it):
 ```json
 {"done": true}
 ```
