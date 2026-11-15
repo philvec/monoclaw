@@ -11,6 +11,8 @@ from pydantic import BaseModel, ValidationError
 
 from config import CRON_CHANNEL, WS_HOST, WS_MAX_FRAME_BYTES, WS_PORT, logger
 
+HANDSHAKE_OPTIONS = {"classifier": True, "quick_session": False}  # the defaults (see the protocol below)
+
 
 class InboundImage(BaseModel):
     mime: str
@@ -34,11 +36,15 @@ class WebSocketChannelManager:
     WebSocket server where each connected client is a named channel.
 
     Protocol:
-      - Client connects and sends a handshake with its name: {"name": "signal/bob"}
+      - Client connects and sends a handshake with its name: {"name": "signal/bob"}, optionally with
+        "classifier": false (no fast classifier: every message goes to the agent; default true) and
+        "quick_session": true (a fresh conversation: no history loaded or saved, memory extracted once
+        when the connection closes; default false)
       - Client sends messages: {"text": "..."} with optional
         "images": [{"mime": "image/jpeg", "data": "<base64>", "name": "photo.jpg"}]
         (an entry may also be an MP4 video: "mime": "video/mp4")
-      - Server sends replies as two frames: {"chunk": "..."} then {"end": true}
+      - Server sends replies as two frames: {"chunk": "..."} then {"end": true}; a message can get
+        several replies (progress lines, then the answer), and {"done": true} follows the last one
 
     Plain HTTP `GET /status` on the same port answers {"busy": bool}: a message is being
     classified or answered, or a cron turn runs. modeswitch waits for false before swapping the LLM.
@@ -46,16 +52,21 @@ class WebSocketChannelManager:
 
     def __init__(self) -> None:
         self._connections: dict[str, Any] = {}
+        self._options: dict[str, dict[str, bool]] = {}  # per connected channel: the handshake's options
         self._on_message: Callable[[InboundMessage], Coroutine[Any, Any, None]]
         self._agent_busy: Callable[[], bool]
+        self._on_connect: Callable[[str, dict[str, bool]], None]
+        self._on_disconnect: Callable[[str, dict[str, bool]], None]
         self._in_flight = 0
 
     # Lifecycle
 
     async def start(self, on_message: Callable[[InboundMessage], Coroutine[Any, Any, None]],
-                    agent_busy: Callable[[], bool]) -> None:
+                    agent_busy: Callable[[], bool], on_connect: Callable[[str, dict[str, bool]], None],
+                    on_disconnect: Callable[[str, dict[str, bool]], None]) -> None:
         self._on_message = on_message
         self._agent_busy = agent_busy
+        self._on_connect, self._on_disconnect = on_connect, on_disconnect
         logger.info(f"websocket server listening on {WS_HOST}:{WS_PORT}")
         async with websockets.serve(self._handle, WS_HOST, WS_PORT, max_size=WS_MAX_FRAME_BYTES,
                                     process_request=self._status):
@@ -77,6 +88,9 @@ class WebSocketChannelManager:
     @property
     def active_channels(self) -> list[str]:
         return list(self._connections.keys())
+
+    def classifier_enabled(self, channel_name: str) -> bool:
+        return self._options.get(channel_name, {}).get("classifier", True)
 
     # Sending — all methods raise if the channel isn't connected or the send fails.
 
@@ -106,6 +120,14 @@ class WebSocketChannelManager:
         await self.send_chunk(channel_name, text, images)
         await self.end_msg(channel_name)
 
+    async def turn_done(self, channel_name: str) -> None:
+        """Signal that a message has had all its replies (a client that ignores unknown frames, like
+        signal-bridge, is unaffected)."""
+        ws = self._connections.get(channel_name)
+        if ws is None:
+            raise RuntimeError(f"channel {channel_name!r} is not connected")
+        await ws.send(json.dumps({"done": True}))
+
     # WebSocket handler
 
     async def _handle(self, ws: Any) -> None:
@@ -123,13 +145,21 @@ class WebSocketChannelManager:
                 await ws.send(json.dumps({"error": err}))
                 await ws.close()
                 return
+            options = {k: handshake.get(k, default) for k, default in HANDSHAKE_OPTIONS.items()}
+            if bad := [k for k, v in options.items() if not isinstance(v, bool)]:
+                logger.warning(err := f"handshake rejected: {', '.join(bad)} must be true or false")
+                await ws.send(json.dumps({"error": err}))
+                await ws.close()
+                return
         except Exception as exc:
             logger.warning(f"handshake failed: {exc}")
             await ws.close()
             return
 
-        self._connections[name] = ws
-        logger.info(f"🔌 channel connected: {name!r}")
+        self._connections[name], self._options[name] = ws, options
+        logger.info(f"🔌 channel connected: {name!r}"
+                    + "".join(f", {k}={v}" for k, v in options.items() if v != HANDSHAKE_OPTIONS[k]))
+        self._on_connect(name, options)
 
         try:
             async for raw in ws:
@@ -158,3 +188,4 @@ class WebSocketChannelManager:
         finally:
             self._connections.pop(name, None)
             logger.info(f"🔌 channel disconnected: {name!r}")
+            self._on_disconnect(name, self._options.pop(name))

@@ -88,11 +88,21 @@ async def main() -> None:
 
     async def on_message(msg: InboundMessage) -> None:
         try:
-            decision = await fast_classifier.process(msg)
+            await dispatch(msg)
+        finally:
+            try:
+                await channel_manager.turn_done(msg.channel)
+            except Exception as exc:
+                logger.warning(f"done signal to {msg.channel!r} skipped: {exc}")
+
+    async def dispatch(msg: InboundMessage) -> None:
+        decision = None
+        try:
+            if channel_manager.classifier_enabled(msg.channel):
+                decision = await fast_classifier.process(msg)
         except Exception:
             # Defensive: process() is already fail-safe, but never let the layer block a message.
             logger.exception(f"fast classifier layer crashed on {msg.channel!r}; falling through to agent")
-            decision = None
         if decision is not None and decision.handled:
             return  # immediate: the layer answered and recorded the turn
         if msg.channel.startswith("signal/"):
@@ -136,7 +146,8 @@ async def main() -> None:
         asyncio.create_task(_resume(), name="mcp-resume")
 
     logger.info("monoclaw starting")
-    await channel_manager.start(on_message, agent_busy=lambda: agent.busy)
+    await channel_manager.start(on_message, agent_busy=lambda: agent.busy, on_connect=agent.channel_connected,
+                                on_disconnect=agent.channel_disconnected)
 
 
 async def _cleanup(cron: CronService, mcp: MCPClient) -> None:

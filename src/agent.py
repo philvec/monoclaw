@@ -404,6 +404,9 @@ class AgentLoop:
         # slot, and interleaved turns would evict each other's prompt cache.
         self._lock = asyncio.Lock()
         self.extra_system_prompt = ""  # the extra tools' system_prompt() (main.py), appended to the system prompt
+        self._quick: set[str] = set()  # quick sessions: history in memory only, memory extracted once at the end
+        self._warm_next: str | None = None  # the newest channel that connected, still to be warmed
+        self._connect_warm: asyncio.Task | None = None
         self._histories: dict[str, list[ChatCompletionMessageParam]] = {}
         self._latest: dict[str, InboundMessage] = {}  # per channel — see previous_replies()
         self._foreground_count = 0
@@ -468,6 +471,43 @@ class AgentLoop:
     def busy(self) -> bool:
         """A foreground turn (message or cron) is queued or running."""
         return not self._foreground_idle.is_set()
+
+    # Channel lifecycle (channels.py calls these on a handshake and a disconnect)
+
+    def channel_connected(self, channel: str, options: dict[str, bool]) -> None:
+        """A quick session starts as a fresh conversation. Every connect warms the LLM cache for the
+        channel's next turn, fire and forget."""
+        if options["quick_session"]:
+            self._quick.add(channel)
+            self._histories[channel] = []
+            self._latest.pop(channel, None)
+        self._warm_next = channel
+        if self._connect_warm is None or self._connect_warm.done():
+            self._connect_warm = asyncio.create_task(self._connect_warms(), name="warm-on-connect")
+
+    async def _connect_warms(self) -> None:
+        """One warm-up at a time; channels that connect meanwhile collapse into the newest of them
+        (signal-bridge reconnects all its channels at once)."""
+        while (channel := self._warm_next) is not None:
+            self._warm_next = None
+            await self._foreground_idle.wait()
+            await self._warm_cache(channel)
+
+    def channel_disconnected(self, channel: str, options: dict[str, bool]) -> None:
+        if options["quick_session"]:
+            asyncio.create_task(self._close_quick_session(channel), name="quick-session-close")
+
+    async def _close_quick_session(self, channel: str) -> None:
+        """The session's only memory extraction, after its last turn; then it is archived and dropped."""
+        async with self._lock:
+            pass  # a turn of this session still queued or running finishes first
+        if MEMORY_ENABLED and self._histories.get(channel):
+            await self._run_extract_memories(channel)
+        self._archive_checkpoint(channel)
+        self._histories.pop(channel, None)
+        self._latest.pop(channel, None)
+        self._quick.discard(channel)
+        logger.info(f"⚡ quick session {channel!r} closed")
 
     # Public entry points
 
@@ -952,7 +992,7 @@ class AgentLoop:
         # Coalesce extraction tasks per channel. On cap hit, bypass the task system entirely and
         # await extraction directly — session lock is still held, so all new turns queue
         # behind us until it completes. No cancellation possible.
-        if llm_ok and MEMORY_ENABLED:
+        if llm_ok and MEMORY_ENABLED and ch not in self._quick:  # a quick session extracts once, when it closes
             pending = self._pending_extract.pop(ch, None)
             if pending and not pending.done():
                 count = self._extract_cancel_count[ch] = self._extract_cancel_count.get(ch, 0) + 1
@@ -986,6 +1026,8 @@ class AgentLoop:
     # Checkpoint
 
     def _save_checkpoint(self, channel: str) -> None:
+        if channel in self._quick:
+            return  # in memory only: never restored, archived when it closes
         try:
             _checkpoint_path(channel).write_text("\n".join(json.dumps(m) for m in self._histories[channel]) + "\n")
         except Exception as exc:
@@ -1011,6 +1053,8 @@ class AgentLoop:
         return entries
 
     def _append_to_checkpoint(self, channel: str, msg: ChatCompletionMessageParam) -> None:
+        if channel in self._quick:
+            return
         try:
             with open(_checkpoint_path(channel), "a") as f:
                 f.write(json.dumps(msg) + "\n")
@@ -1049,11 +1093,11 @@ class AgentLoop:
                     role="system",
                     content=self._build_system_prompt(),
                 ),
-                *self._histories[channel],
+                *self._history(channel),
                 ChatCompletionUserMessageParam(role="user", content="INPUT CHANNEL: warmup"),
                 ChatCompletionUserMessageParam(role="user", content="."),
             ]
-            logger.info(f"🔥 warming agent cache ({len(messages)} msgs)")
+            logger.info(f"🔥 warming agent cache for {channel!r} ({len(messages)} msgs)")
             # must expand images too, or the warmed prefix diverges from the real turn's
             await self._llm.chat(_with_images(messages), tools=self._tool_registry.definitions, max_tokens=1)
             logger.info("✅ agent cache warmed")

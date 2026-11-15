@@ -35,6 +35,8 @@ A bridge connects to monoclaw via WebSocket on port `8765`.
 {"name": "signal"}
 ```
 
+Two optional flags (shown with their defaults): `"classifier": true` — `false` sends every message straight to the agent, without the fast classifier (e.g. a voice front end that already answers the simple things itself); `"quick_session": false` — `true` makes the connection a fresh conversation: no history loaded or saved, no memory extraction per turn, and one extraction over the whole session once the connection closes (the session is then archived and dropped). Every connect warms the LLM cache for the channel's next turn.
+
 **Inbound message** (bridge → monoclaw):
 ```json
 {"text": "Hello!"}
@@ -55,6 +57,11 @@ Optionally with images — the model is multimodal. `images` may be omitted enti
 When the agent is about to reply (it may still need to run tools before generating content), it sends one empty chunk right away — bridges can treat any inbound chunk as "typing started":
 ```json
 {"chunk": ""}
+```
+
+Once a message has had all its replies, a `done` frame follows (bridges that only deliver messages can ignore it):
+```json
+{"done": true}
 ```
 
 **Error** (monoclaw → bridge, e.g. bad handshake):
