@@ -8,12 +8,11 @@ a constrained, structured verdict:
 
     language      = str (of the conversation)
     response_mode = "immediate" | "complex"
-    output        = str
-    tool_call     = { name, arguments } | null   (only when tools are configured)
+    output        = str                          (immediate only)
+    tool_call     = { name, arguments } | null   (immediate only, when tools are configured)
 
-- "complex":   ``output`` is sent at once as a "working on it" note (not recorded in
-               history), then the message falls through to the full agent. Photos/videos
-               are always complex.
+- "complex":   the message falls through to the full agent; nothing is sent. Photos/videos
+               skip the classifier and go straight to the agent.
 - "immediate" + no tool_call: the layer answers the user directly with ``output``
                and records the turn into history, without calling the big model.
 - "immediate" + tool_call: the layer executes the whitelisted MCP tool, delivers
@@ -85,18 +84,6 @@ _LANGUAGES = [lang for family in (
     "Guarani",
 ) for lang in family.split(", ")]
 
-# Photo/video messages: complex only, no tool call — the classifier cannot see what it would act on.
-_MEDIA_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "language": {"type": "string", "enum": _LANGUAGES},
-        "response_mode": {"type": "string", "enum": ["complex"]},
-        "output": {"type": "string", "minLength": 1},
-    },
-    "required": ["language", "response_mode", "output"],
-    "additionalProperties": False,
-}
-
 # Confirmation of a completed tool action when the classifier's `output` came back empty. User-facing → Polish.
 _CONFIRM_TEMPLATES = [
     "Wykonano: {subject}.",
@@ -162,7 +149,6 @@ def _complete_tool_call(content: str) -> ToolCall | None:
 class Decision(BaseModel):
     handled: bool = False  # True ⇒ the layer answered/acted; do NOT call the agent this turn
     preamble: str | None = None  # non-None ⇒ inject this note before the agent turn (fail-safe)
-    ack: str | None = None  # non-None ⇒ send this to the channel at once, before the agent turn
 
 
 class FastClassifier:
@@ -191,13 +177,23 @@ class FastClassifier:
 
     def _build_response_schema(self) -> dict:
         """Grammar-constrained response schema. With tools, ``tool_call`` is a discriminated union
-        (per-tool ``name`` enum + that tool's own MCP arg schema); without tools it's omitted."""
+        (per-tool ``name`` enum + that tool's own MCP arg schema); without tools it's omitted. complex is
+        a separate variant that ends after response_mode: it sends nothing, so it generates nothing more."""
+        complex_variant = {
+            "type": "object",
+            "properties": {
+                "language": {"type": "string", "enum": _LANGUAGES},
+                "response_mode": {"type": "string", "enum": ["complex"]},
+            },
+            "required": ["language", "response_mode"],
+            "additionalProperties": False,
+        }
         schema: dict[str, Any] = {
             "type": "object",
             "properties": {
-                "language": {"type": "string", "enum": _LANGUAGES},  # of the conversation: the ack's language
-                "response_mode": {"type": "string", "enum": ["immediate", "complex"]},
-                "output": {"type": "string", "minLength": 1},  # complex too: it is the instant ack
+                "language": {"type": "string", "enum": _LANGUAGES},  # of the conversation: output's language
+                "response_mode": {"type": "string", "enum": ["immediate"]},
+                "output": {"type": "string", "minLength": 1},
             },
             "required": ["language", "response_mode", "output"],
             "additionalProperties": False,
@@ -222,7 +218,7 @@ class FastClassifier:
             schema["required"].append("tool_call")
             # llama.cpp generates properties in this order: a tool confirmation follows the arguments it describes
             schema["properties"]["output"] = schema["properties"].pop("output")
-        return schema
+        return {"anyOf": [complex_variant, schema]}
 
     def _build_tools_doc(self) -> str:
         """Render the whitelisted tools (name, signature, description) into a prompt section, so the
@@ -252,7 +248,8 @@ class FastClassifier:
 
     async def process(self, msg: InboundMessage) -> Decision:
         """Classify one inbound message and decide routing. Never raises."""
-        if not self.enabled or not (msg.text or msg.images) or msg.channel == CRON_CHANNEL:
+        # Photos/videos: the classifier cannot see what it would act on, so they can only be complex.
+        if not self.enabled or not msg.text or msg.images or msg.channel == CRON_CHANNEL:
             return Decision(handled=False)
 
         try:
@@ -262,15 +259,8 @@ class FastClassifier:
             return Decision(handled=False, preamble=f"[FAST CLASSIFIER ERROR: {exc}]")
 
         if verdict.response_mode != "immediate":
-            ack = verdict.output.strip()
-            if not ack or _is_json(ack):
-                logger.warning(f"⚡ COMPLEX with empty or JSON output {ack!r} on {msg.channel!r} — no ack sent")
-                return Decision(handled=False)
-            logger.info(
-                f"⚡ classified COMPLEX [{msg.channel}] [{verdict.language}] — ack {ack!r}, passthrough to main agent"
-            )
-            msg.replies.append(ack)
-            return Decision(handled=False, ack=ack)
+            logger.info(f"⚡ classified COMPLEX [{msg.channel}] [{verdict.language}] — passthrough to main agent")
+            return Decision(handled=False)
 
         if verdict.tool_call is not None:
             return await self._run_tool(msg, verdict, tool_task)
@@ -404,16 +394,6 @@ class FastClassifier:
                 f"\n\n{user}"
             )
         schema = self._response_schema
-        if msg.images:
-            # The model runs without an mmproj: it would answer confidently about media it cannot see, so
-            # the grammar allows only complex and the note asks for a "looking at it" ack.
-            kind = "a video" if any(i.mime.startswith("video/") for i in msg.images) else "a photo"
-            user += (
-                f"\n[Attached: {kind}. You cannot see it; the full assistant will. In output, tell the user in "
-                'the language of the conversation that you are looking at it (e.g. "Patrzę na zdjęcie...", '
-                '"Oglądam filmik...", "Looking at the photo...").]'
-            )
-            schema = _MEDIA_SCHEMA
 
         content, early, tool_task = "", None, None
         try:
