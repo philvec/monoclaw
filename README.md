@@ -61,7 +61,7 @@ When the agent is about to reply (it may still need to run tools before generati
 {"chunk": ""}
 ```
 
-A progress line (narration before a tool call) ends with `{"end": true, "interim": true}` instead, so a client can tell it from the answer. Once a message has had all its replies, a `done` frame follows (bridges that only deliver messages can ignore it):
+A progress line (narration before a tool call) ends with `{"end": true, "interim": true}` instead, so a client can tell it from the answer. Each step's tool calls follow it (or come alone, when the step has no progress line) as `{"tools": [{"name": "fdb_query", "arguments": {...}}]}`, sent before they run. Once a message has had all its replies, a `done` frame follows (bridges that only deliver messages can ignore it):
 ```json
 {"done": true}
 ```

@@ -701,6 +701,12 @@ class AgentLoop:
 
                 if msg.channel != CRON_CHANNEL:
                     try:
+                        # the model's own arguments, before they run (a voice front end tells what is checked)
+                        await self._channel_manager.tool_calls(
+                            msg.channel, [{"name": tc.name, "arguments": tc.arguments} for tc in response.tool_calls])
+                    except Exception as exc:
+                        logger.warning(f"tool calls to {msg.channel!r} not reported: {exc}")
+                    try:
                         await self._channel_manager.send_chunk(msg.channel, "")
                         typing_signaled = True
                     except Exception as exc:

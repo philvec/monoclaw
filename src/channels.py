@@ -46,7 +46,8 @@ class WebSocketChannelManager:
         channel's running and queued turns first)
       - Server sends replies as two frames: {"chunk": "..."} then {"end": true}; a message can get
         several replies (progress lines end with {"end": true, "interim": true}, then the answer), and
-        {"done": true} follows the last one
+        {"done": true} follows the last one. Each step's tool calls follow its progress line, if any, as
+        {"tools": [{"name": ..., "arguments": {...}}]}
 
     Plain HTTP `GET /status` on the same port answers {"busy": bool}: a message is being
     classified or answered, or a cron turn runs. modeswitch waits for false before swapping the LLM.
@@ -123,6 +124,14 @@ class WebSocketChannelManager:
         """Atomic chunk + end convenience — single complete message."""
         await self.send_chunk(channel_name, text, images)
         await self.end_msg(channel_name, interim)
+
+    async def tool_calls(self, channel_name: str, calls: list[dict]) -> None:
+        """The tools the agent is about to call, [{"name", "arguments"}] (after the step's progress line, if
+        any; a client that ignores unknown frames, like signal-bridge, is unaffected)."""
+        ws = self._connections.get(channel_name)
+        if ws is None:
+            raise RuntimeError(f"channel {channel_name!r} is not connected")
+        await ws.send(json.dumps({"tools": calls}))
 
     async def turn_done(self, channel_name: str) -> None:
         """Signal that a message has had all its replies (a client that ignores unknown frames, like
